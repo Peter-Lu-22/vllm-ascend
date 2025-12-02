@@ -313,6 +313,7 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.load_model()
+            #TODO: 初始化位置修改
             self.fault_tolerance = FaultTolerance(
                 vllm_config=self.vllm_config,
                 model=self.model_runner.model,

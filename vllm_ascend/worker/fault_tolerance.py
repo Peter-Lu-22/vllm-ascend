@@ -10,10 +10,9 @@ from typing import Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
-from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
-from vllm_ascend.worker.recovery_chain import UCEHandler, RecoveryHandler, ForceStopHandler, NetworkHandler
+from vllm_ascend.worker.recovery_chain import RecoveryHandler, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
@@ -24,7 +23,6 @@ class FaultTolerance:
         #TODO: 需要确认当前启动参数里有没有additional_config
         self.level = vllm_config.additional_config.get("fault_tolerance_level",0)
         self.fault_queue = queue.Queue()
-        self.memory_info = MemoryBlockInfo(self.model)
         self.recovery_chain = self._build_recovery_chain()
 
         # TODO:这里需要用每个dp组下的rank0做汇总，需要确认一下参数是否正确
@@ -32,7 +30,6 @@ class FaultTolerance:
         self.rank = get_dp_group().rank_in_group
 
         self._init_recovery_group()
-        self.memory_info.initialize()
 
         self.aware_event = threading.Event()
         if self.level != FaultToleranceLevel.OFF.value:
@@ -60,9 +57,8 @@ class FaultTolerance:
         """initialize recovery chain"""
         force_stop_handler = ForceStopHandler()
         network_handler = NetworkHandler()
-        uce_handler = UCEHandler()
 
-        force_stop_handler.set_next(network_handler).set_next(uce_handler)
+        force_stop_handler.set_next(network_handler)
 
         return force_stop_handler
 
@@ -87,7 +83,6 @@ class FaultTolerance:
                         exception=e,
                         rank=self.rank,
                         model_or_path=self.vllm_config.model_config.model,
-                        memory_block_info=self.memory_info,
                         fault_queue=self.fault_queue
                     )
                     ft_action = self._handle_exception(recovery_context)
@@ -97,14 +92,17 @@ class FaultTolerance:
                         continue
                     elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
                         logger.info(f"Raise exception at rank {self.rank}")
-                        # TODO: Need to clear cache for current batch and destroy all group
+                        # TODO: 完善销毁逻辑
+                        self.destroy_recovery_group()
                         raise e
                     elif torch.equal(ft_action,FaultAction.RETURN):
                         logger.info(f"Abort current batch at rank {self.rank}")
-                        # TODO: Need to clear cache for current batch and destroy all group
+                        # TODO: 完善销毁逻辑，这里的返回值考虑替换为vllm.v1.outputs.EMPTY_MODEL_RUNNER_OUTPUT
+                        self.destroy_recovery_group()
                         return None
                     else:
-                        # TODO: Need to clear cache for current batch and destroy all group
+                        # TODO: 完善销毁逻辑
+                        self.destroy_recovery_group()
                         logger.info(f"Unknown fault action found at rank {self.rank} ")
                         raise e
 
@@ -139,17 +137,17 @@ class FaultTolerance:
                 return self._single_node_decision(local_recovery_status)
             else:
                 return FaultAction.RAISE_EXCEPTION
-        #TODO:Should refactor codes below
-        """
-        dummy_forward = {"hidden_states":torch.tensor([0])}
-        if self.vllm_config.parallel_config.distributed_executor_backend != (
-            "external_launcher") and not get_pp_group().is_last_rank:
-            get_pp_group().send_tensor_dict(dummy_forward,all_gather_group=get_tp_group())
-        """
+        #TODO:考虑重构下面逻辑
+
+        # gather recovery status
         all_recovery_status = self._gather_statuses(local_recovery_status)
+        # execute restart device and reinit_process_group
         reinit_status = self._restart_and_reinit(ctx)
+        # gather restart and reinit status
         all_reinit_status = self._gather_statuses(reinit_status)
+
         if self.rank == 0:
+            # Rank 0 Analyze all rank's restart status
             has_failed = any(torch.equal(status, RecoveryStatus.FAILED) for status in all_reinit_status)
             if has_failed:
                 reinit_actions = self._analyze_global_status(all_reinit_status)
@@ -170,7 +168,9 @@ class FaultTolerance:
             return FaultAction.RAISE_EXCEPTION
 
     def _gather_statuses(self, local_status:torch.Tensor) -> List[torch.Tensor]:
-        """Rank 0 gathers status from each rank"""
+        """
+        Rank 0 gathers status from each rank
+        """
         try:
             if self.rank == 0:
                 gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
@@ -182,9 +182,8 @@ class FaultTolerance:
                 )
                 return gather_list
             else:
-                # 其他rank只发送，不接收
                 dist.gather(local_status, gather_list=None, dst=0,group=FaultTolerance._recovery_group)
-                return []  # 非rank0返回空列表
+                return []
         except Exception as inner_e:
             logger.error(f"Gather status failed,get exception:{inner_e}")
             if self.rank == 0:
@@ -227,7 +226,9 @@ class FaultTolerance:
         return decisions
 
     def _scatter_ft_actions(self, ft_actions: List[torch.Tensor]) -> torch.Tensor:
-        """Rank 0 distributed fault action to each rank"""
+        """
+        Rank 0 distributed fault action to each rank
+        """
         recv_ft_action = torch.tensor([0])
         dist.scatter(
             recv_ft_action,
@@ -238,7 +239,9 @@ class FaultTolerance:
         return recv_ft_action
 
     def _receive_ft_actions(self) -> torch.Tensor:
-        """Rank 1 ...N receive fault action"""
+        """
+        Rank 1 ...N receive fault action
+        """
         recv_ft_action = torch.tensor([0])
         dist.scatter(
             recv_ft_action,
@@ -263,7 +266,10 @@ class FaultTolerance:
         return reinit_status
 
     def destroy_recovery_group(self):
-        """Destroy recovery process group and fault_aware"""
+        """
+        Destroy recovery process group and fault_aware
+        """
+        #TODO: 完善逻辑
         if FaultTolerance._recovery_group is None:
             return
 
