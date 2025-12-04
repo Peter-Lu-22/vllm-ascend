@@ -11,7 +11,7 @@ from vllm.logger import logger
 from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
-from vllm_ascend.worker.recovery_chain import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
+from vllm_ascend.worker.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler,RecoveryHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
@@ -114,22 +114,20 @@ class FaultTolerance:
         Handle exception in recovery_chain and get fault action for the current batch
         """
         handler = self.recovery_handler_manager.find_handler(ctx)
+        # No target exception ,return raise Exception
         if handler is None:
             return FaultAction.RAISE_EXCEPTION
         _ = self._all_gather()
         logger.info("Synchronized Successfully,Begin restart and reinit")
-        reinit_status = self._restart_and_reinit(ctx)
-        self._coordinate_recovery(ctx,reinit_status)
-        try:
-
-            # 1. Handle exception in recovery_chain and get recovery status
-            local_recovery_status = handler.recover(ctx)
-            # 2. Report recovery status and get fault action
-            ft_action = self._coordinate_recovery(ctx,local_recovery_status)
-            return ft_action
-        except Exception as inner_e:
-            logger.error(f"Handle exception failed at rank {self.rank},get exception {inner_e}")
-            return FaultAction.RAISE_EXCEPTION
+        reinit_status = self._clean_fault(ctx)
+        recover_action = self._coordinate_recovery(ctx,reinit_status)
+        if not torch.equal(recover_action,FaultAction.RECOMPUTE):
+            return recover_action
+        #Begin to recover
+        logger.info("Begin to recover exception")
+        recovery_status = handler.recover(ctx)
+        recovery_action = self._coordinate_recovery(recovery_status)
+        return recovery_action
 
     def _coordinate_recovery(self,ctx:RecoveryContext, local_status:torch.Tensor) -> torch.Tensor:
         """
@@ -138,28 +136,14 @@ class FaultTolerance:
         Failure at any recovery stage will cause re-inference to fail
         Therefore, re-inference is executed only when both restart recovery and fault recovery succeed
         """
-
         # determine fault action for single rank situation
         if not dist.is_initialized() or self.world_size == 1:
             return self._single_node_decision(local_status)
-        #TODO:考虑重构下面逻辑
-
         # gather recovery status
-        all_recovery_status = self._gather_statuses(local_recovery_status)
-        # execute restart device and reinit_process_group
-        reinit_status = self._restart_and_reinit(ctx)
-        # gather restart and reinit status
-        all_reinit_status = self._gather_statuses(reinit_status)
-
+        all_status = self._gather_statuses(local_status)
         if self.rank == 0:
-            # Rank 0 Analyze all rank's restart status
-            has_failed = any(torch.equal(status, RecoveryStatus.FAILED) for status in all_reinit_status)
-            if has_failed:
-                reinit_actions = self._analyze_global_status(all_reinit_status)
-                return self._scatter_ft_actions(reinit_actions)
-            else:
-                ft_actions = self._analyze_global_status(all_recovery_status)
-                return self._scatter_ft_actions(ft_actions)
+            ft_actions = self._analyze_global_status(all_status)
+            return self._scatter_ft_actions(ft_actions)
         else:
             return self._receive_ft_actions()
 
@@ -172,7 +156,7 @@ class FaultTolerance:
         else:
             return FaultAction.RAISE_EXCEPTION
 
-    def _restart_and_reinit(self, ctx: RecoveryContext) -> torch.Tensor:
+    def _clean_fault(self, ctx: RecoveryContext) -> torch.Tensor:
         """
         Restart device and reinit process group
         """
@@ -280,8 +264,6 @@ class FaultTolerance:
             group=FaultTolerance._recovery_group
         )
         return recv_ft_action
-
-
 
     def destroy_recovery_group(self):
         """
