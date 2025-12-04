@@ -17,9 +17,8 @@ class FaultStatus(Enum):
     Fault status which fault_tolerance put into fault_queue
     """
     ACTIVE = torch.tensor([0])
-    UCE_ERR = torch.tensor([1])
-    FORCE_STOP = torch.tensor([2])
-    NETWORK_ERR = torch.tensor([3])
+    FORCE_STOP = torch.tensor([1])
+    NETWORK_ERR = torch.tensor([2])
 
 class FaultCommand:
     """
@@ -29,16 +28,10 @@ class FaultCommand:
     SILENCE_CMD = torch.tensor([1])
     STOP_DEVICE_CMD = torch.tensor([2])
 
-class UCEType(Enum):
-    """
-    Specific uce type for HBM UCE
-    """
-    WEIGHTS_UCE = "WEIGHTS_UCE"
-    KVCACHE_UCE = "KVCACHE_UCE"
-    ACTIVATION_UCE = "ACTIVATION_UCE"
-    UNKNOWN_UCE = "UNKNOWN_UCE"
-
 class RecoveryStatus:
+    """
+    Recovery status
+    """
     SUCCESS = torch.tensor([0])
     FAILED = torch.tensor([1])
 

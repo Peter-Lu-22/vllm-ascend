@@ -2,7 +2,6 @@ import torch
 import functools
 import queue
 import threading
-import torch_npu
 import torch.distributed as dist
 
 from datetime import timedelta
@@ -12,22 +11,21 @@ from vllm.logger import logger
 from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
-from vllm_ascend.worker.recovery_chain import RecoveryHandler, ForceStopHandler, NetworkHandler
+from vllm_ascend.worker.recovery_chain import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
     _recovery_group = None
     def __init__(self,vllm_config:VllmConfig,model):
         self.model = model
-        self.vllm_config = vllm_config
         #TODO: 需要确认当前启动参数里有没有additional_config
         self.level = vllm_config.additional_config.get("fault_tolerance_level",0)
         self.fault_queue = queue.Queue()
-        self.recovery_chain = self._build_recovery_chain()
+        self.recovery_handler_manager = self._build_recovery_handler_manager()
 
         # TODO:这里需要用每个dp组下的rank0做汇总，需要确认一下参数是否正确
-        self.world_size = get_dp_group().world_size
-        self.rank = get_dp_group().rank_in_group
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
 
         self._init_recovery_group()
 
@@ -46,24 +44,28 @@ class FaultTolerance:
 
         FaultTolerance._recovery_group = dist.new_group(
             #TODO:确认这个dp_group.ranks是否是我需要的
-            ranks=get_dp_group().ranks,
+            ranks=None,
             timeout=timedelta(minutes=5),
             backend="gloo",
         )
 
         logger.info(f"Recovery group initialization successful for rank {self.rank}")
 
-    def _build_recovery_chain(self) -> RecoveryHandler:
+    def _build_recovery_handler_manager(self) -> RecoveryHandlerManager:
         """initialize recovery chain"""
-        force_stop_handler = ForceStopHandler()
+        recovery_handler_manager = RecoveryHandlerManager()
+
+        force_handler = ForceStopHandler()
         network_handler = NetworkHandler()
 
-        force_stop_handler.set_next(network_handler)
+        recovery_handler_manager.register_handler(force_handler)
+        recovery_handler_manager.register_handler(network_handler)
 
-        return force_stop_handler
+        return recovery_handler_manager
 
-    def fault_tolerance_decorator(self, func: Callable) -> Callable:
+    def fault_tolerance_decorator(self, func: Callable,max_retries: int) -> Callable:
         """fault tolerance decorator is used to modify the execute_model for exception handling."""
+        _retry_times = 0
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Level 0:disable fault tolerance
@@ -71,7 +73,7 @@ class FaultTolerance:
                 output = func(*args,**kwargs)
                 return output
             # Enable fault tolerance
-            while True:
+            for _retry_times in range(max_retries):
                 try:
                     output = func(*args, **kwargs)
                     return output
@@ -82,7 +84,6 @@ class FaultTolerance:
                         level=self.level,
                         exception=e,
                         rank=self.rank,
-                        model_or_path=self.vllm_config.model_config.model,
                         fault_queue=self.fault_queue
                     )
                     ft_action = self._handle_exception(recovery_context)
@@ -112,9 +113,17 @@ class FaultTolerance:
         """
         Handle exception in recovery_chain and get fault action for the current batch
         """
+        handler = self.recovery_handler_manager.find_handler(ctx)
+        if handler is None:
+            return FaultAction.RAISE_EXCEPTION
+        _ = self._all_gather()
+        logger.info("Synchronized Successfully,Begin restart and reinit")
+        reinit_status = self._restart_and_reinit(ctx)
+        self._coordinate_recovery(ctx,reinit_status)
         try:
+
             # 1. Handle exception in recovery_chain and get recovery status
-            local_recovery_status = self.recovery_chain.handle(ctx)
+            local_recovery_status = handler.recover(ctx)
             # 2. Report recovery status and get fault action
             ft_action = self._coordinate_recovery(ctx,local_recovery_status)
             return ft_action
@@ -122,7 +131,7 @@ class FaultTolerance:
             logger.error(f"Handle exception failed at rank {self.rank},get exception {inner_e}")
             return FaultAction.RAISE_EXCEPTION
 
-    def _coordinate_recovery(self,ctx:RecoveryContext, local_recovery_status:torch.Tensor) -> torch.Tensor:
+    def _coordinate_recovery(self,ctx:RecoveryContext, local_status:torch.Tensor) -> torch.Tensor:
         """
         Rank 0 gathers recovery status and determines fault actions for each rank
         Recovery status is categorized into restart recovery and fault recovery
@@ -132,11 +141,7 @@ class FaultTolerance:
 
         # determine fault action for single rank situation
         if not dist.is_initialized() or self.world_size == 1:
-            reinit_status = self._restart_and_reinit(ctx)
-            if torch.equal(reinit_status,RecoveryStatus.SUCCESS):
-                return self._single_node_decision(local_recovery_status)
-            else:
-                return FaultAction.RAISE_EXCEPTION
+            return self._single_node_decision(local_status)
         #TODO:考虑重构下面逻辑
 
         # gather recovery status
@@ -166,6 +171,31 @@ class FaultTolerance:
             return FaultAction.RECOMPUTE
         else:
             return FaultAction.RAISE_EXCEPTION
+
+    def _restart_and_reinit(self, ctx: RecoveryContext) -> torch.Tensor:
+        """
+        Restart device and reinit process group
+        """
+        try:
+            torch_npu.npu.restart_device(torch.npu.current_device())
+            torch.distributed.reinit_process_group(group=None, rebuild_link=False)
+            reinit_status = RecoveryStatus.SUCCESS
+        except Exception as inner_e:
+            logger.error(f"Failed to restart and reinit process group for rank {ctx.rank},get exception :{inner_e}")
+            ctx.exception = inner_e
+            reinit_status = RecoveryStatus.FAILED
+        return reinit_status
+
+    def _all_gather(self):
+        device_stopped = torch.tensor([self.rank])
+        gather_list = [torch.zeros_like([0]) for _ in range(self.world_size)]
+        logger.info(f"Rank {self.rank} waiting for all ranks to throw exceptions")
+        try:
+            dist.all_gather(gather_list, device_stopped)
+            return gather_list
+        except Exception as inner_e:
+            logger.error(f"All gather failed,exception:{inner_e}")
+            raise inner_e
 
     def _gather_statuses(self, local_status:torch.Tensor) -> List[torch.Tensor]:
         """
@@ -251,19 +281,7 @@ class FaultTolerance:
         )
         return recv_ft_action
 
-    def _restart_and_reinit(self,ctx:RecoveryContext) -> torch.Tensor:
-        """
-        Restart device and reinit process group
-        """
-        try:
-            torch_npu.npu.restart_device(torch.npu.current_device())
-            torch.distributed.reinit_process_group(group=None,rebuild_link=False)
-            reinit_status = RecoveryStatus.SUCCESS
-        except Exception as inner_e:
-            logger.error(f"Failed to restart and reinit process group for rank {self.rank},get exception :{inner_e}")
-            ctx.exception = inner_e
-            reinit_status = RecoveryStatus.FAILED
-        return reinit_status
+
 
     def destroy_recovery_group(self):
         """
