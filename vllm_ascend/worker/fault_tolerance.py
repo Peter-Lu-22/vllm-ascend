@@ -9,43 +9,43 @@ from typing import Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
-from vllm_ascend.worker.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler,RecoveryHandler
+from vllm_ascend.worker.recovery_handler import RecoveryHandlerManager, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
     _recovery_group = None
     def __init__(self,vllm_config:VllmConfig,model):
         self.model = model
-        #TODO: 需要确认当前启动参数里有没有additional_config
-        self.level = vllm_config.additional_config.get("fault_tolerance_level",0)
+        self.vllm_config = vllm_config
+
+        additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.level = additional_config.get("fault_tolerance_level",
+                                        0) if additional_config else 0
         self.fault_queue = queue.Queue()
         self.recovery_handler_manager = self._build_recovery_handler_manager()
 
-        # TODO:这里需要用每个dp组下的rank0做汇总，需要确认一下参数是否正确
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
-
         self._init_recovery_group()
-
         self.aware_event = threading.Event()
         if self.level != FaultToleranceLevel.OFF.value:
             FaultAware(
                 self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
             ).start()
-
+    #TODO: 动态建组逻辑补充
     def _init_recovery_group(self):
         """
         Initialize the global communication group for reporting abnormal status to fault_aware.
         """
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
         if not dist.is_initialized() or self.world_size == 1:
             return
 
         FaultTolerance._recovery_group = dist.new_group(
-            #TODO:确认这个dp_group.ranks是否是我需要的
             ranks=None,
-            timeout=timedelta(minutes=5),
+            timeout=timedelta(minutes=1),
             backend="gloo",
         )
 
@@ -65,7 +65,7 @@ class FaultTolerance:
 
     def fault_tolerance_decorator(self, func: Callable,max_retries: int) -> Callable:
         """fault tolerance decorator is used to modify the execute_model for exception handling."""
-        _retry_times = 0
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Level 0:disable fault tolerance
@@ -73,17 +73,17 @@ class FaultTolerance:
                 output = func(*args,**kwargs)
                 return output
             # Enable fault tolerance
-            for _retry_times in range(max_retries):
+            for attempt in range(max_retries):
                 try:
                     output = func(*args, **kwargs)
                     return output
                 except Exception as e:
+                    if attempt >= max_retries:
+                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}")
+                        raise e
                     # Encapsulate the context information required for fault recovery.
                     recovery_context = RecoveryContext(
-                        model=self.model,
-                        level=self.level,
                         exception=e,
-                        rank=self.rank,
                         fault_queue=self.fault_queue
                     )
                     ft_action = self._handle_exception(recovery_context)
@@ -93,19 +93,11 @@ class FaultTolerance:
                         continue
                     elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
                         logger.info(f"Raise exception at rank {self.rank}")
-                        # TODO: 完善销毁逻辑
-                        self.destroy_recovery_group()
                         raise e
                     elif torch.equal(ft_action,FaultAction.RETURN):
                         logger.info(f"Abort current batch at rank {self.rank}")
-                        # TODO: 完善销毁逻辑，这里的返回值考虑替换为vllm.v1.outputs.EMPTY_MODEL_RUNNER_OUTPUT
-                        self.destroy_recovery_group()
-                        return None
-                    else:
-                        # TODO: 完善销毁逻辑
-                        self.destroy_recovery_group()
-                        logger.info(f"Unknown fault action found at rank {self.rank} ")
-                        raise e
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         return wrapper
 
@@ -117,10 +109,11 @@ class FaultTolerance:
         # No target exception ,return raise Exception
         if handler is None:
             return FaultAction.RAISE_EXCEPTION
+        # Rank Status
         _ = self._all_gather()
         logger.info("Synchronized Successfully,Begin restart and reinit")
         reinit_status = self._clean_fault(ctx)
-        recover_action = self._coordinate_recovery(ctx,reinit_status)
+        recover_action = self._coordinate_recovery(reinit_status)
         if not torch.equal(recover_action,FaultAction.RECOMPUTE):
             return recover_action
         #Begin to recover
@@ -129,7 +122,7 @@ class FaultTolerance:
         recovery_action = self._coordinate_recovery(recovery_status)
         return recovery_action
 
-    def _coordinate_recovery(self,ctx:RecoveryContext, local_status:torch.Tensor) -> torch.Tensor:
+    def _coordinate_recovery(self,local_status:torch.Tensor) -> torch.Tensor:
         """
         Rank 0 gathers recovery status and determines fault actions for each rank
         Recovery status is categorized into restart recovery and fault recovery
@@ -265,19 +258,4 @@ class FaultTolerance:
         )
         return recv_ft_action
 
-    def destroy_recovery_group(self):
-        """
-        Destroy recovery process group and fault_aware
-        """
-        #TODO: 完善逻辑
-        if FaultTolerance._recovery_group is None:
-            return
-
-        logger.info("Destroying recovery process group")
-        try:
-            dist.destroy_process_group(FaultTolerance._recovery_group)
-            FaultTolerance._recovery_group = None
-            logger.info("Successfully destroyed recovery process group")
-        except Exception as e:
-            logger.error(f"Failed to destroy recovery process group: {e}")
 
