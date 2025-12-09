@@ -2,13 +2,13 @@ import torch
 import functools
 import queue
 import threading
+import torch_npu
 import torch.distributed as dist
 
 from datetime import timedelta
 from typing import Callable,List
 from vllm.config import VllmConfig
 from vllm.logger import logger
-from vllm.distributed.parallel_state import get_pp_group,get_tp_group,get_dp_group
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm_ascend.worker.fault_aware import FaultAware
 from vllm_ascend.worker.common import FaultAction,FaultToleranceLevel,RecoveryStatus
@@ -17,6 +17,7 @@ from vllm_ascend.worker.recovery_context import RecoveryContext
 
 class FaultTolerance:
     _recovery_group = None
+    _sync_group = None
     def __init__(self,vllm_config:VllmConfig,model):
         self.model = model
         self.vllm_config = vllm_config
@@ -24,32 +25,46 @@ class FaultTolerance:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         self.level = additional_config.get("fault_tolerance_level",
                                         0) if additional_config else 0
+        self.is_enable_ep = self.vllm_config.parallel_config.enable_expert_parallel
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+
         self.fault_queue = queue.Queue()
         self.recovery_handler_manager = self._build_recovery_handler_manager()
 
         self._init_recovery_group()
+        if not self.is_enable_ep:
+            self._init_sync_group()
+
         self.aware_event = threading.Event()
         if self.level != FaultToleranceLevel.OFF.value:
             FaultAware(
                 self.rank,self.world_size,self.fault_queue,aware_event=self.aware_event
             ).start()
-    #TODO: 动态建组逻辑补充
     def _init_recovery_group(self):
         """
-        Initialize the global communication group for reporting abnormal status to fault_aware.
+        Initialize the global communication group for fault recovery and token re-inference
         """
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.rank = dist.get_rank() if dist.is_initialized() else 0
+
         if not dist.is_initialized() or self.world_size == 1:
             return
 
         FaultTolerance._recovery_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=1),
+            timeout=timedelta(minutes=3),
             backend="gloo",
         )
 
         logger.info(f"Recovery group initialization successful for rank {self.rank}")
+    def _init_sync_group(self):
+
+        if not dist.is_initialized() or self.world_size == 1:
+            return
+        FaultTolerance._sync_group = dist.new_group(
+            ranks=None,
+            timeout=timedelta(minutes=3),
+            backend="hccl"
+        )
 
     def _build_recovery_handler_manager(self) -> RecoveryHandlerManager:
         """initialize recovery chain"""
@@ -76,6 +91,8 @@ class FaultTolerance:
             for attempt in range(max_retries):
                 try:
                     output = func(*args, **kwargs)
+                    if not self.is_enable_ep:
+                        self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
                     if attempt >= max_retries:
@@ -110,7 +127,7 @@ class FaultTolerance:
         if handler is None:
             return FaultAction.RAISE_EXCEPTION
         # Rank Status
-        _ = self._all_gather()
+        _ = self._all_gather_for_recovery_group()
         logger.info("Synchronized Successfully,Begin restart and reinit")
         reinit_status = self._clean_fault(ctx)
         recover_action = self._coordinate_recovery(reinit_status)
@@ -163,15 +180,26 @@ class FaultTolerance:
             reinit_status = RecoveryStatus.FAILED
         return reinit_status
 
-    def _all_gather(self):
-        device_stopped = torch.tensor([self.rank])
+    def _all_gather_for_recovery_group(self):
+        local_status = torch.tensor([self.rank])
         gather_list = [torch.zeros_like([0]) for _ in range(self.world_size)]
         logger.info(f"Rank {self.rank} waiting for all ranks to throw exceptions")
         try:
-            dist.all_gather(gather_list, device_stopped)
+            dist.all_gather(gather_list, local_status)
             return gather_list
         except Exception as inner_e:
-            logger.error(f"All gather failed,exception:{inner_e}")
+            logger.error(f"All gather failed,exception for recovery_group:{inner_e}")
+            raise inner_e
+
+    def _all_gather_for_sync_group(self):
+        local_status = torch.tensor([self.rank],dtype=torch.int32,device="npu")
+        gather_list = [torch.zeros_like([0]) for _ in range(self.world_size)]
+        logger.info(f"Rank {self.rank} waiting for all ranks to finish execute_model")
+        try:
+            dist.all_gather(gather_list, local_status)
+            return gather_list
+        except Exception as inner_e:
+            logger.error(f"All gather failed for _sync_group,exception:{inner_e}")
             raise inner_e
 
     def _gather_statuses(self, local_status:torch.Tensor) -> List[torch.Tensor]:

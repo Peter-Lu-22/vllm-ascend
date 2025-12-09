@@ -7,7 +7,6 @@ import torch_npu
 
 from datetime import timedelta
 from vllm.logger import logger
-from vllm.distributed.parallel_state import get_dp_group
 from vllm_ascend.worker.common import FaultStatus,FaultCommand
 
 class FaultAware:
@@ -17,7 +16,6 @@ class FaultAware:
                  aware_event:threading.Event=None):
         self.rank = rank
         self.world_size = world_size
-        #TODO: 这里不能拿全局的device信息了，要拿dp组内的
         self.npu_id = torch.npu.current_device()
         self.fault_queue = fault_queue
         self.interval_s = interval_s
@@ -50,7 +48,7 @@ class FaultAware:
         )
         FaultAware._fault_aware_group = torch.distributed.new_group(
             #TODO:和fault_tolerance一样，判断ranks是否正确
-            ranks=get_dp_group().ranks,
+            ranks=None,
             timeout=timedelta(minutes=5),
             backend="gloo"
         )

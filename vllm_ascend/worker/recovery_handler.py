@@ -67,7 +67,7 @@ class RecoveryHandlerManager:
 
     def find_handler(self,ctx:RecoveryContext) -> Optional[RecoveryHandler]:
         for handler in self.handlers:
-            if handler.can_handle(ctx.exception):
+            if handler.can_handle(ctx):
                 return handler
         logger.warning("Can't find corresponding handler,assuming,maybe a non-target failure scenario.")
         return None
