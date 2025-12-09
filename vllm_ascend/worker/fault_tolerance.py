@@ -182,10 +182,10 @@ class FaultTolerance:
 
     def _all_gather_for_recovery_group(self):
         local_status = torch.tensor([self.rank])
-        gather_list = [torch.zeros_like([0]) for _ in range(self.world_size)]
+        gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
         logger.info(f"Rank {self.rank} waiting for all ranks to throw exceptions")
         try:
-            dist.all_gather(gather_list, local_status)
+            dist.all_gather(gather_list, local_status,group=FaultTolerance._recovery_group)
             return gather_list
         except Exception as inner_e:
             logger.error(f"All gather failed,exception for recovery_group:{inner_e}")
@@ -193,10 +193,10 @@ class FaultTolerance:
 
     def _all_gather_for_sync_group(self):
         local_status = torch.tensor([self.rank],dtype=torch.int32,device="npu")
-        gather_list = [torch.zeros_like([0]) for _ in range(self.world_size)]
+        gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
         logger.info(f"Rank {self.rank} waiting for all ranks to finish execute_model")
         try:
-            dist.all_gather(gather_list, local_status)
+            dist.all_gather(gather_list, local_status,group=FaultTolerance._sync_group)
             return gather_list
         except Exception as inner_e:
             logger.error(f"All gather failed for _sync_group,exception:{inner_e}")
