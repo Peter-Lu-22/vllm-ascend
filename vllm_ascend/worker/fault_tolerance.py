@@ -18,8 +18,8 @@ from vllm_ascend.worker.recovery_context import RecoveryContext
 class FaultTolerance:
     _recovery_group = None
     _sync_group = None
-    def __init__(self,vllm_config:VllmConfig,model):
-        self.model = model
+    def __init__(self,vllm_config:VllmConfig,model_runner):
+        self.model_runner = model_runner
         self.vllm_config = vllm_config
 
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
@@ -89,6 +89,7 @@ class FaultTolerance:
                 return output
             # Enable fault tolerance
             for attempt in range(max_retries):
+                state_backup = self._create_essential_state_backup()
                 try:
                     output = func(*args, **kwargs)
                     if not self.is_enable_ep:
@@ -101,7 +102,8 @@ class FaultTolerance:
                     # Encapsulate the context information required for fault recovery.
                     recovery_context = RecoveryContext(
                         exception=e,
-                        fault_queue=self.fault_queue
+                        fault_queue=self.fault_queue,
+                        back_up=state_backup
                     )
                     ft_action = self._handle_exception(recovery_context)
                     if torch.equal(ft_action,FaultAction.RECOMPUTE):
@@ -173,9 +175,10 @@ class FaultTolerance:
         try:
             torch_npu.npu.restart_device(torch.npu.current_device())
             torch.distributed.reinit_process_group(group=None, rebuild_link=False)
+            self._restore_essential_state(ctx.back_up)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
-            logger.error(f"Failed to restart and reinit process group for rank {ctx.rank},get exception :{inner_e}")
+            logger.error(f"Failed to restart and reinit process group for rank {self.rank},get exception :{inner_e}")
             ctx.exception = inner_e
             reinit_status = RecoveryStatus.FAILED
         return reinit_status
@@ -183,7 +186,7 @@ class FaultTolerance:
     def _all_gather_for_recovery_group(self):
         local_status = torch.tensor([self.rank])
         gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
-        logger.info(f"Rank {self.rank} waiting for all ranks to throw exceptions")
+        logger.debug(f"Rank {self.rank} waiting for all ranks to throw exceptions")
         try:
             dist.all_gather(gather_list, local_status,group=FaultTolerance._recovery_group)
             return gather_list
@@ -194,7 +197,7 @@ class FaultTolerance:
     def _all_gather_for_sync_group(self):
         local_status = torch.tensor([self.rank],dtype=torch.int32,device="npu")
         gather_list = [torch.zeros_like(local_status) for _ in range(self.world_size)]
-        logger.info(f"Rank {self.rank} waiting for all ranks to finish execute_model")
+        logger.debug(f"Rank {self.rank} waiting for all ranks to finish execute_model")
         try:
             dist.all_gather(gather_list, local_status,group=FaultTolerance._sync_group)
             return gather_list
@@ -287,3 +290,65 @@ class FaultTolerance:
         return recv_ft_action
 
 
+    def _create_essential_state_backup(self):
+        backup = {}
+        if not hasattr(self.model_runner,'requests') or not hasattr(self.model_runner,'input_batch'):
+            return backup
+        # Backup requests
+        requests_backup = {}
+        for req_id,state in self.model_runner.requests.items():
+            if state is None:
+                continue
+            req_backup = {
+                'output_token_ids' : state.output_token_ids.copy() if state.output_token_ids else [],
+                'num_computed_tokens' : state.num_computed_tokens,
+            }
+            requests_backup[req_id] = req_backup
+
+        backup['requests_essential'] = requests_backup
+        # Backup input_batch
+        ib = self.model_runner.input_batch
+
+        backup['_req_ids'] = ib._req_ids.copy()
+        backup['req_output_token_ids'] = ib.req_output_token_ids.copy()
+        backup['req_id_to_index'] = dict(ib.req_id_to_index)
+
+        essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
+        for attr_name in essential_arrays:
+            if hasattr(ib,attr_name):
+                attr_value = getattr(ib,attr_name)
+                if attr_value is not None:
+                    backup[attr_name] = attr_value.copy()
+
+        if hasattr(ib,'prev_sampled_token_ids') and ib.prev_sampled_token_ids is not None:
+            backup['prev_sampled_token_ids'] = ib.prev_sampled_token_ids.clone()
+        return backup
+
+    def _restore_essential_state(self,backup):
+        if not backup:
+            return
+        if 'requests_essential' in backup and hasattr(self.model_runner,'requests'):
+            for req_id,req_backup in backup['requests_essential'].items():
+                if req_id in self.model_runner.requests:
+                    state = self.model_runner.requests[req_id]
+                    state.output_token_ids = req_backup['output_token_ids']
+                    state.num_computed_tokens = req_backup['num_computed_tokens']
+        if hasattr(self.model_runner,'input_batch'):
+            ib = self.model_runner.input_batch
+
+            if '_req_ids' in backup:
+                ib._req_ids[:] = backup['_req_ids']
+            if 'req_output_token_ids' in backup:
+                ib.req_output_token_ids[:] = backup['req_output_token_ids']
+            if 'req_id_to_index' in backup:
+                ib.req_id_to_index.clear()
+                ib.req_id_to_index.update(backup['req_id_to_index'])
+
+            essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
+            for attr_name in essential_arrays:
+                if attr_name in backup and hasattr(ib,attr_name):
+                    target = getattr(ib,attr_name)
+                    if target is not None and backup[attr_name] is not None:
+                        target[:] = backup[attr_name]
+            if 'prev_sampled_token_ids' in backup and hasattr(ib,'prev_sampled_token_ids'):
+                ib.prev_sampled_token_ids = backup['prev_sampled_token_ids']
