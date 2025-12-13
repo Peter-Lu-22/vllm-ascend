@@ -92,7 +92,7 @@ class FaultTolerance:
                 state_backup = self._create_essential_state_backup()
                 try:
                     output = func(*args, **kwargs)
-                    if not self.is_enable_ep:
+                    if not self.is_enable_ep and output is not EMPTY_MODEL_RUNNER_OUTPUT:
                         self._all_gather_for_sync_group()
                     return output
                 except Exception as e:
@@ -200,6 +200,7 @@ class FaultTolerance:
         logger.debug(f"Rank {self.rank} waiting for all ranks to finish execute_model")
         try:
             dist.all_gather(gather_list, local_status,group=FaultTolerance._sync_group)
+            torch.npu.synchronize()
             return gather_list
         except Exception as inner_e:
             logger.error(f"All gather failed for _sync_group,exception:{inner_e}")

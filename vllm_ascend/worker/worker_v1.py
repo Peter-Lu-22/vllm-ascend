@@ -316,8 +316,7 @@ class NPUWorker(WorkerBase):
             #TODO: 初始化位置修改
             self.fault_tolerance = FaultTolerance(
                 vllm_config=self.vllm_config,
-                model=self.model_runner.model,
-                level=FaultToleranceLevel.BASIC
+                model_runner=self.model_runner,
             )
             self.execute_model = self.fault_tolerance.fault_tolerance_decorator(self.execute_model)
             self.execute_dummy_batch = self.fault_tolerance.fault_tolerance_decorator(self.execute_dummy_batch)
