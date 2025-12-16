@@ -80,7 +80,6 @@ class FaultTolerance:
 
     def fault_tolerance_decorator(self, func: Callable,max_retries: int) -> Callable:
         """fault tolerance decorator is used to modify the execute_model for exception handling."""
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Level 0:disable fault tolerance
