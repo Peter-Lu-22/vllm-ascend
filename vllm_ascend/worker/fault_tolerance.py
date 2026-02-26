@@ -2,6 +2,8 @@ import torch
 import functools
 import queue
 import threading
+import json
+import hashlib
 import torch_npu
 import torch.distributed as dist
 
@@ -35,6 +37,7 @@ class FaultTolerance:
         self._init_sync_group()
 
         self.state_backup = {}
+        self.async_batch_to_backup = {}
         self.aware_event = threading.Event()
         self.stop_event = threading.Event()
         FaultAware(
@@ -82,7 +85,24 @@ class FaultTolerance:
     def execute_model_decorator(self,func:Callable,max_retries: int,dummy_run: bool) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            self.state_backup = self._create_essential_state_backup(*args, **kwargs)
+            if not dummy_run:
+                batch_key = self._generate_scheduler_output_key(args[0])
+                if batch_key in self.async_batch_to_backup:
+                    logger.info(f"Async goes wrong,token re-inference")
+                    self._restore_essential_state(self.async_batch_to_backup[batch_key])
+                    keys_to_remove = [k for k in self.async_batch_to_backup.keys() if k != batch_key]
+                    for key in keys_to_remove:
+                        del self.async_batch_to_backup[key]
+                    logger.info(f"Clear other keys")
+                else:
+                    map_size = len(self.async_batch_to_backup)
+                    if map_size >= 2:
+                        oldest_key = next(iter(self.async_batch_to_backup))
+                        del self.async_batch_to_backup[oldest_key]
+                    self.state_backup = self._create_essential_state_backup(*args, **kwargs)
+                    self.async_batch_to_backup[batch_key] = self.state_backup
+            else:
+                self.state_backup = self._create_essential_state_backup(*args, **kwargs)
             for attempt in range(max_retries + 1):
                 try:
                     output = func(*args, **kwargs)
@@ -326,6 +346,20 @@ class FaultTolerance:
             group=FaultTolerance._recovery_group
         )
         return recv_ft_action
+
+    def _generate_scheduler_output_key(self, scheduler_output):
+        new_req_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
+        cached_req_ids = [req_id for req_id in scheduler_output.scheduled_cached_reqs.req_ids]
+        cached_num_tokens = [num_tokens for num_tokens in scheduler_output.scheduled_cached_reqs.num_computed_tokens]
+
+        key_data = {
+            "new_req_ids": new_req_ids,
+            "cached_req_ids": cached_req_ids,
+            "cached_num_tokens": cached_num_tokens
+        }
+
+        key_json = json.dumps(key_data, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(key_json.encode('utf-8')).hexdigest()
 
     def _create_essential_state_backup(self,*args,**kwargs) -> dict:
         backup = {}
