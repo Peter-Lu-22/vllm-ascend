@@ -172,6 +172,10 @@ class FaultTolerance:
                     elif torch.equal(ft_action, FaultAction.RETURN):
                         logger.info(f"Abort current batch at rank {self.rank}")
                         return EMPTY_MODEL_RUNNER_OUTPUT
+                    else:
+                        logger.error(f"Unexpected FaultAction {ft_action}, aborting")
+                        raise RuntimeError(f"Unknown fault action")
+
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         return wrapper
