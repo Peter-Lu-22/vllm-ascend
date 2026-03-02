@@ -23,11 +23,12 @@ class FaultTolerance:
     _recovery_group = None
     _sync_group = None
 
-    def __init__(self, vllm_config:VllmConfig, model_runner, execute_model_func, interval_s=5):
+    def __init__(self, vllm_config:VllmConfig, model_runner, execute_model_func, interval_s=5, max_backup_batches=2):
         self.model_runner = model_runner
         self.execute_model_func = execute_model_func
         self.vllm_config = vllm_config
         self.interval_s = interval_s
+        self.max_backup_batches = max_backup_batches
 
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0
@@ -94,12 +95,12 @@ class FaultTolerance:
                         logger.info(f"Current batch is token reinference batch")
                         self.state_backup = self.async_batch_to_backup[batch_key]
                         self._restore_essential_state(self.state_backup)
-                        keys_to_remove = [k for k in self.async_batch_to_backup.keys() if k != batch_key]
+                        keys_to_remove = [k for k in self.async_batch_to_backup if k != batch_key]
                         for key in keys_to_remove:
                             del self.async_batch_to_backup[key]
                     else:
                         map_size = len(self.async_batch_to_backup)
-                        if map_size >= 2:
+                        if map_size >= self.max_backup_batches:
                             oldest_key = next(iter(self.async_batch_to_backup))
                             del self.async_batch_to_backup[oldest_key]
                         self.state_backup = self._create_essential_state_backup(*args, **kwargs)
@@ -113,7 +114,8 @@ class FaultTolerance:
                     return output
                 except Exception as e:
                     if attempt >= max_retries:
-                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}")
+                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，"
+                                       f"raising exception: {e}")
                         raise e
                     # Encapsulate the context information required for fault recovery.
                     recovery_context = RecoveryContext(
@@ -149,7 +151,8 @@ class FaultTolerance:
                     return output
                 except Exception as e:
                     if attempt >= max_retries:
-                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，raising exception: {e}")
+                        logger.warning(f"Max retries {max_retries} exceeded at rank {self.rank}，"
+                                       f"raising exception: {e}")
                         raise e
                     # Encapsulate the context information required for fault recovery.
                     recovery_context = RecoveryContext(
@@ -409,7 +412,12 @@ class FaultTolerance:
         backup['_removed'] = copy.deepcopy(builder._removed)
         backup['added'] = copy.deepcopy(builder.added)
 
-        essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
+        essential_arrays = ['token_ids_cpu',
+                            'num_tokens',
+                            'num_tokens_no_spec',
+                            'num_computed_tokens_cpu',
+                            'num_accepted_tokens_cpu'
+                            ]
         for attr_name in essential_arrays:
             if hasattr(ib,attr_name):
                 attr_value = getattr(ib,attr_name)
@@ -468,7 +476,12 @@ class FaultTolerance:
             if 'added' in backup:
                 ib.batch_update_builder.added[:] = backup['added']
 
-            essential_arrays = ['token_ids_cpu','num_tokens','num_tokens_no_spec','num_computed_tokens_cpu','num_accepted_tokens_cpu']
+            essential_arrays = ['token_ids_cpu',
+                                'num_tokens',
+                                'num_tokens_no_spec',
+                                'num_computed_tokens_cpu',
+                                'num_accepted_tokens_cpu'
+                                ]
             for attr_name in essential_arrays:
                 if attr_name in backup and hasattr(ib,attr_name):
                     target = getattr(ib,attr_name)

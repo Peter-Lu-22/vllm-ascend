@@ -12,11 +12,6 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 
 from tests.ut.base import TestBase
-patcher_fault_aware = patch('vllm_ascend.token_reinference.fault_aware.FaultAware')
-mock_fault_aware_class = patcher_fault_aware.start()
-mock_fault_aware_instance = MagicMock()
-mock_fault_aware_class.return_value = mock_fault_aware_instance
-
 from vllm_ascend.token_reinference.fault_tolerance import FaultTolerance
 from vllm_ascend.token_reinference.common import FaultAction, RecoveryStatus
 from vllm_ascend.token_reinference.recovery_context import RecoveryContext
@@ -61,6 +56,12 @@ class TestFaultTolerance(TestBase):
         patcher_npu_sync = patch('torch_npu.npu.synchronize')
         self.mock_npu_sync = patcher_npu_sync.start()
         self.addCleanup(patcher_npu_sync.stop)
+
+        patcher_fault_aware = patch('vllm_ascend.token_reinference.fault_tolerance.FaultAware')
+        mock_fault_aware_class = patcher_fault_aware.start()
+        mock_fault_aware_instance = MagicMock()
+        mock_fault_aware_class.return_value = mock_fault_aware_instance
+        self.addCleanup(patcher_fault_aware.stop)
 
         self.logger_patcher = patch('vllm_ascend.token_reinference.fault_tolerance.logger')
         self.mock_logger = self.logger_patcher.start()

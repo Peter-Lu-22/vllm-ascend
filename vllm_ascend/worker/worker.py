@@ -632,16 +632,22 @@ class NPUWorker(WorkerBase):
         additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
         level = additional_config.get("fault_tolerance_level",
                                       0) if additional_config else 0
+        max_reinference_times = additional_config.get("max_reinference_times", 3) if additional_config else 3
         if level != FaultToleranceLevel.LEVEL_0.value:
             self.fault_tolerance = FaultTolerance(
                 vllm_config=self.vllm_config,
                 model_runner=self.model_runner,
                 execute_model_func=self.execute_model,
             )
-            self.execute_model = self.fault_tolerance.execute_model_decorator(self.execute_model, 3, dummy_run=False)
-            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(self.execute_dummy_batch, 3,
-                                                                                    dummy_run=True)
-            self.sample_tokens = self.fault_tolerance.sample_token_decorator(self.sample_tokens, 3)
+            self.execute_model = self.fault_tolerance.execute_model_decorator(
+                func=self.execute_model, max_retries=max_reinference_times, dummy_run=False
+            )
+            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(
+                func=self.execute_dummy_batch, max_retries=max_reinference_times, dummy_run=True
+            )
+            self.sample_tokens = self.fault_tolerance.sample_token_decorator(
+                func=self.sample_tokens, max_retries=max_reinference_times
+            )
 
 def parse_text_output(output) -> None:
     lines = output.strip().split("\n")

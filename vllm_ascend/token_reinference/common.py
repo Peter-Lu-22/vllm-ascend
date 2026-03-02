@@ -8,7 +8,7 @@ class FaultToleranceLevel(Enum):
     level 1 : enable base fault tolerance for L1->L2 Network Error
     """
     LEVEL_0 = 0
-    LEVLE_1 = 1
+    LEVEL_1 = 1
 
 class FaultStatus(Enum):
     """

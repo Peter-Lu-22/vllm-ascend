@@ -34,10 +34,7 @@ class ForceStopHandler(RecoveryHandler):
 
     def can_handle(self, ctx:RecoveryContext) -> bool:
         error_str = str(ctx.exception).lower()
-        for error in force_stop_error:
-            if error in error_str:
-                return True
-        return False
+        return any(error in error_str for error in force_stop_error)
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
 

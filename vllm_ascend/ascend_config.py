@@ -137,8 +137,8 @@ class AscendConfig:
                 raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
-        self.fault_tolerance_level = additional_config.get(
-            "fault_tolerance_level", 0)
+        self.fault_tolerance_level = additional_config.get("fault_tolerance_level", 0)
+        self.max_token_reinference_times = additional_config.get("max_reinference_times", 3)
 
     def _construct_weight_prefetch_config(self, additional_config):
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
