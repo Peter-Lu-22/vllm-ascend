@@ -4,11 +4,11 @@ from enum import Enum
 class FaultToleranceLevel(Enum):
     """
     Fault tolerance level
-    level 0: disable fault tolerance
-    level 1: enable base fault tolerance for Lingqu L1->L2 Network Error
+    level_0 : disable fault tolerance
+    level 1 : enable base fault tolerance for L1->L2 Network Error
     """
-    OFF = 0
-    BASIC = 1
+    LEVEL_0 = 0
+    LEVLE_1 = 1
 
 class FaultStatus(Enum):
     """

@@ -315,18 +315,8 @@ class NPUWorker(WorkerBase):
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
-        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
-        level = additional_config.get("fault_tolerance_level",
-                                      0) if additional_config else 0
-        if level != FaultToleranceLevel.OFF.value:
-            self.fault_tolerance = FaultTolerance(
-                vllm_config = self.vllm_config,
-                model_runner = self.model_runner,
-                execute_model_func = self.execute_model,
-            )
-            self.execute_model = self.fault_tolerance.execute_model_decorator(self.execute_model,3,dummy_run=False)
-            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(self.execute_dummy_batch,3,dummy_run=True)
-            self.sample_tokens = self.fault_tolerance.sample_token_decorator(self.sample_tokens,3)
+
+        self.init_fault_tolerance()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -638,6 +628,20 @@ class NPUWorker(WorkerBase):
             logger.info(f"query NPU card {self.local_rank} fail: {e}")
         return
 
+    def init_fault_tolerance(self):
+        additional_config = self.vllm_config.additional_config if self.vllm_config.additional_config is not None else {}
+        level = additional_config.get("fault_tolerance_level",
+                                      0) if additional_config else 0
+        if level != FaultToleranceLevel.LEVEL_0.value:
+            self.fault_tolerance = FaultTolerance(
+                vllm_config=self.vllm_config,
+                model_runner=self.model_runner,
+                execute_model_func=self.execute_model,
+            )
+            self.execute_model = self.fault_tolerance.execute_model_decorator(self.execute_model, 3, dummy_run=False)
+            self.execute_dummy_batch = self.fault_tolerance.execute_model_decorator(self.execute_dummy_batch, 3,
+                                                                                    dummy_run=True)
+            self.sample_tokens = self.fault_tolerance.sample_token_decorator(self.sample_tokens, 3)
 
 def parse_text_output(output) -> None:
     lines = output.strip().split("\n")

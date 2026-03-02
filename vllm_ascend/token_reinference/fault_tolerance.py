@@ -23,10 +23,11 @@ class FaultTolerance:
     _recovery_group = None
     _sync_group = None
 
-    def __init__(self, vllm_config:VllmConfig, model_runner, execute_model_func):
+    def __init__(self, vllm_config:VllmConfig, model_runner, execute_model_func, interval_s=5):
         self.model_runner = model_runner
         self.execute_model_func = execute_model_func
         self.vllm_config = vllm_config
+        self.interval_s = interval_s
 
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0
@@ -54,7 +55,7 @@ class FaultTolerance:
 
         FaultTolerance._recovery_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=5),
+            timeout=timedelta(minutes=self.interval_s),
             backend="gloo",
         )
 
@@ -67,7 +68,7 @@ class FaultTolerance:
             return
         FaultTolerance._sync_group = dist.new_group(
             ranks=None,
-            timeout=timedelta(minutes=5),
+            timeout=timedelta(minutes=self.interval_s),
             backend="hccl"
         )
 
@@ -132,6 +133,9 @@ class FaultTolerance:
                     elif torch.equal(ft_action, FaultAction.RETURN):
                         logger.info(f"Abort current batch at rank {self.rank}")
                         return EMPTY_MODEL_RUNNER_OUTPUT
+                    else:
+                        logger.error(f"Unexpected FaultAction {ft_action}, aborting")
+                        raise RuntimeError(f"Unknown fault action")
             return EMPTY_MODEL_RUNNER_OUTPUT
         return wrapper
 
