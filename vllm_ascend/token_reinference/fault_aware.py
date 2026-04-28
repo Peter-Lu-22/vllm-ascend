@@ -8,7 +8,7 @@ import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.token_reinference.common import FaultCommand, FaultStatus
-
+from vllm_ascend.token_reinference.destroy_reinit import destroy_parallel_group, rebuild_parallel_group
 
 class FaultAware:
     _fault_aware_group = None
@@ -150,7 +150,10 @@ class FaultAware:
             time.sleep(self.interval_s)
         elif torch.equal(fault_cmd, FaultCommand.STOP_DEVICE_CMD):
             logger.info("Error detected in cluster,executing stop_device on NPU %s", self.npu_id)
+            destroy_parallel_group("PP")
+            destroy_parallel_group("DP")
             self._stop_device()
+            time.sleep(5)
             current_status = FaultStatus.ACTIVE.value
         else:
             logger.error("Unknown fault command received:%s", fault_cmd)

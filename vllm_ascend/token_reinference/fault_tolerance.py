@@ -117,28 +117,8 @@ class FaultTolerance:
                 if ft is None:
                     return func(worker_self, *args, **kwargs)
                 for attempt in range(ft.max_retry_times + 1):
-                    if not dummy_run:
-                        batch_key = ft._generate_scheduler_output_key(args[0])
-                        if batch_key in ft.async_batch_to_backup:
-                            logger.debug("Current batch might be token reinference batch")
-                            ft.state_backup = ft.async_batch_to_backup[batch_key]
-                            ft._restore_essential_state(ft.state_backup)
-                            keys_to_remove = [k for k in ft.async_batch_to_backup if k != batch_key]
-                            for key in keys_to_remove:
-                                del ft.async_batch_to_backup[key]
-                        else:
-                            map_size = len(ft.async_batch_to_backup)
-                            if map_size >= ft.max_backup_batches:
-                                oldest_key = next(iter(ft.async_batch_to_backup))
-                                del ft.async_batch_to_backup[oldest_key]
-                            ft.state_backup = ft._create_essential_state_backup(*args, **kwargs)
-                            ft.async_batch_to_backup[batch_key] = ft.state_backup
-                    else:
-                        ft.state_backup = ft._create_essential_state_backup(*args, **kwargs)
                     try:
                         output = func(worker_self, *args, **kwargs)
-                        if dummy_run:
-                            ft._all_gather_for_sync_group()
                         return output
                     except Exception as e:
                         if attempt >= ft.max_retry_times:
@@ -184,8 +164,6 @@ class FaultTolerance:
                 for attempt in range(ft.max_retry_times + 1):
                     try:
                         output = func(worker_self, *args, **kwargs)
-                        if output is not None:
-                            ft._all_gather_for_sync_group()
                         return output
                     except Exception as e:
                         if attempt >= ft.max_retry_times:
@@ -239,13 +217,7 @@ class FaultTolerance:
         logger.info("Synchronized Successfully,begin to clean fault")
         clean_status = self._clean_fault(ctx)
         recover_action = self._coordinate_recovery(clean_status)
-        if not torch.equal(recover_action, FaultAction.RECOMPUTE):
-            return recover_action
-        # Begin to recover
-        logger.info("Begin to recover error")
-        recovery_status = handler.recover(ctx)
-        recovery_action = self._coordinate_recovery(recovery_status)
-        return recovery_action
+        return recover_action
 
     def _coordinate_recovery(self, local_status: torch.Tensor) -> torch.Tensor:
         """
@@ -288,9 +260,7 @@ class FaultTolerance:
         self._clean_fault_queue()
         try:
             torch_npu.npu.restart_device(torch.npu.current_device())
-            torch.distributed.reinit_process_group(group=None, rebuild_link=False)
-            if ctx.is_dummy_run:
-                self._restore_essential_state(ctx.back_up)
+            # torch.distributed.reinit_process_group(group=None, rebuild_link=False)
             reinit_status = RecoveryStatus.SUCCESS
         except Exception as inner_e:
             logger.error("Failed to clean fault for rank %s,get exception :%s", self.rank, inner_e)
@@ -365,10 +335,7 @@ class FaultTolerance:
         else:
             logger.warning("Partial recovery - success ranks: %s", success_ranks)
             for rank in range(self.world_size):
-                if rank in success_ranks:
-                    decisions.append(FaultAction.RETURN)
-                else:
-                    decisions.append(FaultAction.RAISE_EXCEPTION)
+                decisions.append(FaultAction.RAISE_EXCEPTION)
 
         return decisions
 
