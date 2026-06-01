@@ -1,6 +1,8 @@
 import signal
 import time
+import uuid
 from contextlib import ExitStack
+from typing import cast
 
 import msgspec.msgpack
 import zmq
@@ -8,8 +10,10 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.system_utils import set_process_title
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.utils.network_utils import make_zmq_socket
 from vllm_ascend.recovery.engine_core_recovery_handler import RecoveryHandler
@@ -174,7 +178,48 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                             pass
                     self.batch_queue.clear()
                     logger.info("[RAS][engine=%d] batch_queue drained", self.dp_rank)
-                self.scheduler.reset_prefix_cache(reset_running_requests=True)
+                scheduler = cast(Scheduler, self.scheduler)
+                while scheduler.running:
+                    request = scheduler.running.pop()
+                    
+                    scheduler.requests.pop(request.request_id, None)
+                    old_blocks = scheduler.kv_cache_manager.coordinator.get_blocks(
+                        request.request_id
+                    )
+                    old_block_ids = set()
+                    for blocks_list in old_blocks:
+                        for block in blocks_list:
+                            old_block_ids.add(block.block_id)
+                    
+                    scheduler.kv_cache_manager.free(request)
+                    scheduler.encoder_cache_manager.free(request)
+                    if old_block_ids:
+                        scheduler.kv_cache_manager.evict_blocks(old_block_ids)
+                    
+                    new_samping_param = request.sampling_params.copy()
+                    num_decoded_tokens = len(request._output_token_ids)
+                    new_samping_param.max_tokens -= num_decoded_tokens
+
+                    new_engine_core_request = EngineCoreRequest(
+                        request_id=request.request_id,
+                        prompt_token_ids=request._all_token_ids.copy(),
+                        mm_features=request.mm_features,
+                        sampling_params=new_samping_param,
+                        arrival_time=request.arrival_time,
+                        lora_request=request.lora_request,
+                        cache_salt=request.cache_salt,
+                        data_parallel_rank=None,
+                        prompt_embeds = request.prompt_embeds,
+                        client_index=request.client_index,
+                        priority=request.priority,
+                        trace_headers=request.trace_headers,
+                        resumable=request.resumable,
+                        reasoning_enabled=None,
+                    )
+                    new_request, wave = self.preprocess_add_request(new_engine_core_request)
+                    scheduler.requests[new_request.request_id] = new_request
+                    scheduler.waiting.prepend_request(new_request)
+                    scheduler.prev_step_scheduled_req_ids.discard(request.request_id)
             try:
                 if not exception_occurred:
                     self._process_input_queue()

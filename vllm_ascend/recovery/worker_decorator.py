@@ -13,7 +13,7 @@ def fault_recovery_decorator():
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            if self.in_recovery:
+            if self.exception_occur or self.in_recovery:
                 return None
             else:
                 try:
@@ -25,7 +25,6 @@ def fault_recovery_decorator():
                         torch.distributed.reinit_process_group(
                             group=None, rebuild_link=False
                         )
-                        get_world_group().barrier()
                         try:
                             get_dp_group().reinit_cpu_group()
                         except AssertionError:
@@ -36,6 +35,7 @@ def fault_recovery_decorator():
                             pass
                         self.device_stopped = False
                         logger.info(f"[WorkerDecorator] Func {func.__name__} reinit process group after restart device")
+                        get_world_group().barrier()
                     output = func(self, *args, **kwargs)
                     return output
                 except Exception as e:

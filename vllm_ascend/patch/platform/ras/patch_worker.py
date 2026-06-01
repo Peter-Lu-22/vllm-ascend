@@ -73,6 +73,7 @@ def enqueue_output(self, output: Any):
             output = output.get_output()
         except Exception as e:
             logger.error("[WorkerProc] Enqueue_output detected exception, send to WorkerMonitor")
+            self.exception_occur = True
             if not self.worker.in_recovery:
                 self.worker.in_recovery = True
                 exception_info = ExceptionInfo(
