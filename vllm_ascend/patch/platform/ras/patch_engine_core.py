@@ -1,3 +1,4 @@
+import copy
 import signal
 import time
 import threading
@@ -7,6 +8,7 @@ from typing import cast
 
 import msgspec.msgpack
 import zmq
+from vllm import pooling_params
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.logger import logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -198,7 +200,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                     if old_block_ids:
                         scheduler.kv_cache_manager.evict_blocks(old_block_ids)
                     
-                    new_samping_param = request.sampling_params.copy()
+                    new_samping_param = copy.deepcopy(request.sampling_params)
                     num_decoded_tokens = len(request._output_token_ids)
                     new_samping_param.max_tokens -= num_decoded_tokens
 
@@ -207,6 +209,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                         prompt_token_ids=request._all_token_ids.copy(),
                         mm_features=request.mm_features,
                         sampling_params=new_samping_param,
+                        pooling_params=request.pooling_params,
                         arrival_time=request.arrival_time,
                         lora_request=request.lora_request,
                         cache_salt=request.cache_salt,
@@ -216,7 +219,7 @@ class RasDPEngineCoreProc(DPEngineCoreProc):
                         priority=request.priority,
                         trace_headers=request.trace_headers,
                         resumable=request.resumable,
-                        reasoning_enabled=None,
+                        reasoning_ended=None,
                     )
                     new_request, wave = self.preprocess_add_request(new_engine_core_request)
                     scheduler.requests[new_request.request_id] = new_request
