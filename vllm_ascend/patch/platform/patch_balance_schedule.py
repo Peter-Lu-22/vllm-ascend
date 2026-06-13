@@ -45,9 +45,9 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     return bool(additional_config.get("enable_balance_scheduling", False))
 
-def _recovery_enabled(vllm_config) -> bool:
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    return bool(additional_config.get("enable_recovery", False))
+def _recovery_enabled() -> bool:
+    from vllm_ascend import envs
+    return envs.VLLM_ASCEND_ENABLE_RECOVERY
 
 class BalanceScheduler(Scheduler):
     def __init__(
@@ -1043,7 +1043,7 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
     vllm_config = kwargs.get("vllm_config")
-    recovery_enabled = _recovery_enabled(vllm_config)
+    recovery_enabled = _recovery_enabled()
     balance_enabled = _balance_scheduling_enabled(vllm_config)
 
     # If neither recovery nor balance scheduling is enabled, use original
