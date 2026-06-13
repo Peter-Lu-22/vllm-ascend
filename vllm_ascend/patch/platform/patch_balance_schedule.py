@@ -685,12 +685,11 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
 
     def __init__(self, *args, **kwargs):
         vllm_config: VllmConfig = kwargs["vllm_config"]
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         recover_step_xpub_addr, recover_report_pull_addr, \
             recover_step_result_pull_addr = \
-            get_engine_recovery_bind_address(
-                vllm_config.parallel_config.data_parallel_rank
-            )
+            get_engine_recovery_bind_address(dp_rank)
 
         self._recovery_handler = RecoveryHandler(
             engine_core=None,
@@ -699,7 +698,7 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
 
         logger.info(
             "[dp_rank=%d] RecoveryHandler bind recovery_addrs=%s",
-            self.dp_rank,
+            dp_rank,
             {
                 "recover_step_xpub_addr": recover_step_xpub_addr,
                 "recover_report_pull_addr": recover_report_pull_addr,
