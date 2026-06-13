@@ -1,8 +1,7 @@
 # mypy: ignore-errors
 import signal
-import threading
 import time
-import uuid
+from concurrent.futures import Future
 from contextlib import ExitStack
 from typing import cast
 
@@ -11,7 +10,6 @@ import torch
 import torch.distributed as dist
 import vllm
 import zmq
-from vllm import pooling_params
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -26,14 +24,14 @@ from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs, EngineCoreRequest, EngineCoreRequestType
-from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc, EngineShutdownState
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm_ascend.recovery.engine_core_recovery_handler import RecoveryHandler
-from vllm_ascend.recovery.types import FUTURE_TIMEOUT_SECONDS, NetworkCheck
 from vllm_ascend.recovery.utils import get_engine_recovery_bind_address
 
 _ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
@@ -850,7 +848,12 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
                     # We are in a running state and so must execute a dummy pass
                     # if the model didn't execute any ready requests.
                     self.execute_dummy_batch()
-            except Exception:
+            except Exception as e:
+                logger.info(
+                    "Exception in EngineCore busy loop: %s",
+                    str(e),
+                    exc_info=True
+                )
                 if self._wait_for_recovery_on_exception():
                     continue
                 raise
