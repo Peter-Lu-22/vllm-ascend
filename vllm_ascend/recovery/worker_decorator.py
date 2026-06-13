@@ -18,7 +18,9 @@ def fault_recovery_decorator():
                 return None
             else:
                 try:
+                    logger.info(f"[WorkerDecorator] Func {func.__name__} called, start to execute")
                     output = func(self, *args, **kwargs)
+                    logger.info(f"[WorkerDecorator] Func {func.__name__} called, return {output}")
                     return output
                 except Exception as e:
                     self.exception_occur = True
