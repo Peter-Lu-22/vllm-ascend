@@ -45,6 +45,10 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     return bool(additional_config.get("enable_balance_scheduling", False))
 
+def _recovery_enabled() -> bool:
+    from vllm_ascend.ascend_config import get_ascend_config
+    return get_ascend_config().recovery_config.enable
+
 class BalanceScheduler(Scheduler):
     def __init__(
         self,
@@ -677,7 +681,7 @@ class BalanceDPEngineCoreProc(DPEngineCoreProc):
                 self.step_counter = 0
 
 
-class DPEngineCoreProcWithRecovery(BalanceDPEngineCoreProc):
+class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
 
     def __init__(self, *args, **kwargs):
         vllm_config: VllmConfig = kwargs["vllm_config"]
@@ -856,6 +860,9 @@ class DPEngineCoreProcWithRecovery(BalanceDPEngineCoreProc):
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
             )
+            # Call balance_gather if balance scheduling is enabled
+            if self.scheduler._balance_enabled:
+                self.scheduler.balance_gather(self.dp_group)
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
@@ -1036,7 +1043,11 @@ class DPEngineCoreProcWithRecovery(BalanceDPEngineCoreProc):
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
     vllm_config = kwargs.get("vllm_config")
-    if not _balance_scheduling_enabled(vllm_config):
+    recovery_enabled = _recovery_enabled()
+    balance_enabled = _balance_scheduling_enabled(vllm_config)
+
+    # If neither recovery nor balance scheduling is enabled, use original
+    if not recovery_enabled and not balance_enabled:
         return _ORIGINAL_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
     # Signal handler used for graceful termination.
@@ -1066,9 +1077,12 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
             # Set data parallel rank for this engine process.
             parallel_config.data_parallel_rank = dp_rank
             parallel_config.data_parallel_rank_local = local_dp_rank
-            # Use DPEngineCoreProcWithRecovery when recovery is enabled
-            from vllm_ascend.ascend_config import get_ascend_config
-            if get_ascend_config().recovery_config.enable:
+            # Four cases:
+            # 1. recovery=True, balance=True: DPEngineCoreProcWithRecovery (balance via scheduler._balance_enabled)
+            # 2. recovery=True, balance=False: DPEngineCoreProcWithRecovery
+            # 3. recovery=False, balance=True: BalanceDPEngineCoreProc
+            # 4. recovery=False, balance=False: DPEngineCoreProc (handled above)
+            if recovery_enabled:
                 engine_core = DPEngineCoreProcWithRecovery(*args, **kwargs)
             else:
                 engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
