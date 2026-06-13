@@ -1066,7 +1066,12 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
             # Set data parallel rank for this engine process.
             parallel_config.data_parallel_rank = dp_rank
             parallel_config.data_parallel_rank_local = local_dp_rank
-            engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
+            # Use DPEngineCoreProcWithRecovery when recovery is enabled
+            from vllm_ascend.ascend_config import get_ascend_config
+            if get_ascend_config().recovery_config.enable:
+                engine_core = DPEngineCoreProcWithRecovery(*args, **kwargs)
+            else:
+                engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
         else:
             set_process_title("EngineCore")
             decorate_logs()
