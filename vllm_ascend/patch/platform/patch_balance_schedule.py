@@ -1083,7 +1083,7 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
             # 3. recovery=False, balance=True: BalanceDPEngineCoreProc
             # 4. recovery=False, balance=False: DPEngineCoreProc (handled above)
             if recovery_enabled:
-                engine_core = DPEngineCoreProcWithRecovery(*args, **kwargs)
+                engine_core = DPEngineCoreProcWithRecovery(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
             else:
                 engine_core = BalanceDPEngineCoreProc(*args, **kwargs)
         else:
