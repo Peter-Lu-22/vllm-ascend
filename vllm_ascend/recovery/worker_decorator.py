@@ -1,11 +1,9 @@
 import functools
 
 import msgspec.msgpack
-import torch
-import torch_npu
 
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_world_group
 from vllm.logger import logger
+from vllm_ascend.envs import VLLM_ASCEND_ENABLE_RECOVERY
 from vllm_ascend.recovery.types import ExceptionInfo
 
 
@@ -13,6 +11,10 @@ def fault_recovery_decorator():
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
+            # Skip decorator logic if recovery is not enabled
+            if not VLLM_ASCEND_ENABLE_RECOVERY:
+                return func(self, *args, **kwargs)
+
             if self.exception_occur or self.in_recovery:
                 logger.info(f"[WorkerDecorator] Func {func.__name__} called in recovery phase, return None")
                 return None

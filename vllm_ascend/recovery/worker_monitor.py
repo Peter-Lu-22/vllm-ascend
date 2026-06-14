@@ -1,7 +1,4 @@
 import threading
-import time
-import torch
-import torch_npu
 import msgspec.msgpack
 import zmq
 
@@ -139,6 +136,11 @@ class WorkerMonitor:
     
 
 def create_worker_monitor(worker, vllm_config:VllmConfig):
+    # Skip worker monitor creation if recovery is not enabled
+    from vllm_ascend.envs import VLLM_ASCEND_ENABLE_RECOVERY
+    if not VLLM_ASCEND_ENABLE_RECOVERY:
+        return
+
     if hasattr(worker, 'worker_monitor') and worker.worker_monitor is not None:
         logger.info("WorkerMonitor already exists, skipping creation")
         return
