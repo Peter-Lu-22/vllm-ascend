@@ -820,11 +820,13 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
-
+        self.exception_occurred = False
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             if self._recovery_handler.is_recovering:
+                self.exception_occurred = True
                 self._wait_for_recovery()
+                self.exception_occurred = False
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
@@ -849,6 +851,7 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
                     # if the model didn't execute any ready requests.
                     self.execute_dummy_batch()
             except Exception as e:
+                self.exception_occurred = True
                 logger.info(
                     "Exception in EngineCore busy loop: %s",
                     str(e),
