@@ -82,7 +82,7 @@ class NetworkExceptionHandler(ExceptionHandler):
                 RecoveryAction(name="worker_rebuild_cpu_group"),
                 RecoveryAction(name="worker_recapture_graph"),
             ],
-            timeout_s=60
+            timeout_s=120
         )
 
         network_recover_plan = RecoveryPlan(
