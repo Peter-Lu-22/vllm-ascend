@@ -341,20 +341,10 @@ def _worker_recapture_graph(executor: Any, cfg:dict | None) -> bool:
         NPUPlatform.set_device(executor.device)
         model_runner = executor.model_runner
 
-        # Reset and reinitialize graph params. During capture, handles, events,
-        # and attn_params are appended to lists in _graph_params. If we don't
-        # clear them, recapture will append duplicate stale entries.
         from vllm_ascend.compilation.acl_graph import reset_graph_params, set_graph_params
         reset_graph_params()
         capture_sizes = sorted(model_runner.compilation_config.cudagraph_capture_sizes)
         set_graph_params(capture_sizes)
-
-        # Do NOT create a new graph pool handle (reset_graph_pool=False).
-        # Creating a new handle causes C++ allocator mempool_id conflict:
-        # the old pool entry still exists with use_count=0, and the new
-        # capture hits TORCH_INTERNAL_ASSERT(use_count > 0).
-        # By reusing the existing pool, NPUGraph.reset() + recapture works
-        # through the normal capture flow in ACLGraphWrapper.__call__.
         ACLGraphWrapper.label_reset_all_graphs(reset_graph_pool=False)
         model_runner.capture_model()
         logger.info("worker recapture_graph executed successfully")
