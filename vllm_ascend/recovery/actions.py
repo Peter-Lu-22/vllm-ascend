@@ -171,6 +171,9 @@ def _recompute_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
             waiting_to_remove.add(request)
         elif request in scheduler.running:
             running_to_remove.add(request)
+        else:
+            logger.error(f"recompute_dirty_requests: request {req_id} not found in running or waiting")
+            return cfg, False
     
     # Step 2: Remove from queues
     scheduler.running = remove_all(scheduler.running, running_to_remove)
@@ -295,7 +298,7 @@ def _worker_rebuild_cpu_group(executor: Any, cfg:dict | None) -> bool:
     logger.info("entering worker_rebuild_cpu_group")
     try:
         from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_world_group
-        get_world_group.barrier()
+        get_world_group().barrier()
         try:
             logger.info("worker rebuilding dp_cpu_group")
             get_dp_group().reinit_cpu_group()
