@@ -21,6 +21,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.platform import NPUPlatform
 
 from ..utils import weak_ref_tensors
 
@@ -94,7 +95,9 @@ class ACLGraphWrapper:
 
     @classmethod
     def clear_all_graphs(cls) -> None:
+        current_platform._global_graph_pool = torch.npu.graph_pool_handle()
         for instance in list(cls._all_instances):
+            instance.graph_pool = current_platform.get_global_graph_pool()
             instance.clear_graphs()
     
     @classmethod
