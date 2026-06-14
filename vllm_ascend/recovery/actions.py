@@ -46,6 +46,7 @@ def get_worker_action(name: str) -> ActionFunc:
 
 @engine_core_action("label_dirty_requests")
 def _label_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
+    logger.info("[dp_rank=%d] entering label_dirty_requests", executer.dp_rank)
     scheduler = executer.scheduler
 
     scheduled_req_ids: set[str] = set()
@@ -77,6 +78,7 @@ def _label_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
 
 @engine_core_action("clean_batch_queue")
 def _clean_batch_queue(executer: Any, cfg: dict) -> Tuple[dict, bool]:
+    logger.info("[dp_rank=%d] entering clean_batch_queue", executer.dp_rank)
     if executer.batch_queue is None:
         logger.info("[dp_rank=%d] batch_queue is None, skip clean", executer.dp_rank)
         return cfg, True
@@ -126,6 +128,7 @@ def _rebuild_request(executer, request: Request) -> Request:
 
 @engine_core_action("recompute_dirty_requests")
 def _recompute_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
+    logger.info("[dp_rank=%d] entering recompute_dirty_requests", executer.dp_rank)
     dirty_req_ids = cfg.get("dirty_requests_list", [])
     waiting_dirty_req_ids = set(cfg.get("waiting_dirty_requests_list", []))
 
@@ -172,6 +175,7 @@ def _recompute_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
 
 @worker_action("stop_device")
 def _stop_device(executor: Any, cfg: dict | None) -> bool:
+    logger.info("entering stop_device")
     try:
         NPUPlatform.set_device(executor.device)
         stop_result = torch_npu.npu.stop_device(executor.device.index)
@@ -186,6 +190,7 @@ def _stop_device(executor: Any, cfg: dict | None) -> bool:
 
 @worker_action("restart_device")
 def _restart_device(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering restart_device")
     from vllm_ascend.ascend_config import get_ascend_config
 
     # Wait for exception_occur before restarting device
@@ -222,6 +227,7 @@ def _restart_device(executor: Any, cfg:dict | None) -> bool:
 
 @worker_action("reinit_process_group")
 def _reinit_process_group(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering reinit_process_group")
     try:
         cfg = cfg or {}
         NPUPlatform.set_device(executor.device)
@@ -242,6 +248,7 @@ def _reinit_process_group(executor: Any, cfg:dict | None) -> bool:
 
 @worker_action("worker_clean_dirty_requests_cache")
 def _worker_clean_dirty_requests_cache(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering worker_clean_dirty_requests_cache")
     try:
         cfg = cfg or {}
         model_runner = executor.model_runner
@@ -264,6 +271,7 @@ def _worker_clean_dirty_requests_cache(executor: Any, cfg:dict | None) -> bool:
 
 @worker_action("worker_rebuild_cpu_group")
 def _worker_rebuild_cpu_group(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering worker_rebuild_cpu_group")
     try:
         from vllm.distributed.parallel_state import get_dp_group, get_pp_group
         try:
@@ -282,6 +290,7 @@ def _worker_rebuild_cpu_group(executor: Any, cfg:dict | None) -> bool:
 
 @worker_action("worker_recapture_graph")
 def _worker_recapture_graph(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering worker_recapture_graph")
     try:
         NPUPlatform.set_device(executor.device)
         model_runner = executor.model_runner
@@ -295,12 +304,14 @@ def _worker_recapture_graph(executor: Any, cfg:dict | None) -> bool:
 
 @worker_action("recovery_begin")
 def _recovery_begin(executor: Any, cfg:dict | None) -> bool:
+    logger.info("entering recovery_begin")
     executor.in_recovery = True
     logger.info("recovery_begin executed successfully")
     return cfg, True
 
 @worker_action("recovery_finished")
 def _recovery_finished(executor: Any, cfg: dict | None) -> bool:
+    logger.info("entering recovery_finished")
     executor.in_recovery = False
     executor.exception_occur = False
     logger.info("recovery_finished executed successfully")
