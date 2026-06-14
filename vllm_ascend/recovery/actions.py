@@ -1,3 +1,4 @@
+import copy
 import time
 from typing import Any, Callable, Tuple
 
@@ -102,12 +103,24 @@ def _collect_request_block_ids(scheduler, req_id: str) -> set[int]:
 
 
 def _rebuild_request(executer, request: Request) -> Request:
+    # Use all_token_ids which already contains prompt + decoded tokens
+    new_prompt_token_ids = request.all_token_ids.copy()
+    
+    # Deep copy sampling_params and adjust max_tokens
+    new_sampling_params = copy.deepcopy(request.sampling_params)
+    if new_sampling_params.max_tokens is not None:
+        num_decoded = len(request.all_token_ids) - len(request.prompt_token_ids)
+        new_sampling_params.max_tokens -= num_decoded
+    
+    # Deep copy pooling_params if present
+    new_pooling_params = copy.deepcopy(request.pooling_params) if request.pooling_params else None
+    
     new_engine_core_request = EngineCoreRequest(
         request_id=request.request_id,
-        prompt_token_ids=request.prompt_token_ids,
+        prompt_token_ids=new_prompt_token_ids,
         mm_features=request.mm_features,
-        sampling_params=request.sampling_params,
-        pooling_params=request.pooling_params,
+        sampling_params=new_sampling_params,
+        pooling_params=new_pooling_params,
         arrival_time=request.arrival_time,
         lora_request=request.lora_request,
         cache_salt=request.cache_salt,
@@ -140,30 +153,38 @@ def _recompute_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
     )
 
     scheduler = executer.scheduler
+    
+    # Step 1: Collect dirty requests and classify
     all_dirty_block_ids: set[int] = set()
+    dirty_requests: list[Request] = []
     running_to_remove: set[Request] = set()
-    waiting_to_remove: list[Request] = []
-
+    waiting_to_remove: set[Request] = set()
+    
     for req_id in dirty_req_ids:
         request = scheduler.requests.get(req_id)
         if request is None:
             continue
+        dirty_requests.append(request)
         all_dirty_block_ids |= _collect_request_block_ids(scheduler, req_id)
-        scheduler.kv_cache_manager.free(request)
-        scheduler.encoder_cache_manager.free(request)
-        _rebuild_request(executer, request)
-
+        
         if req_id in waiting_dirty_req_ids:
-            waiting_to_remove.append(request)
-        elif req_id in scheduler.running:
+            waiting_to_remove.add(request)
+        elif request in scheduler.running:
             running_to_remove.add(request)
-        else:
-            logger.warning(f"Request {req_id} is not found in running or waiting, skip")
-
-
+    
+    # Step 2: Remove from queues
     scheduler.running = remove_all(scheduler.running, running_to_remove)
     scheduler.waiting.remove_requests(waiting_to_remove)
+    
+    # Step 3: Free caches, evict blocks, and rebuild
+    for request in dirty_requests:
+        scheduler.kv_cache_manager.free(request)
+        scheduler.encoder_cache_manager.free(request)
+    
     scheduler.kv_cache_manager.evict_blocks(all_dirty_block_ids)
+    
+    for request in dirty_requests:
+        _rebuild_request(executer, request)
 
     logger.info(
         "[dp_rank=%d] recompute_dirty_requests done, %d running + %d waiting reprocessed",
@@ -273,12 +294,15 @@ def _worker_clean_dirty_requests_cache(executor: Any, cfg:dict | None) -> bool:
 def _worker_rebuild_cpu_group(executor: Any, cfg:dict | None) -> bool:
     logger.info("entering worker_rebuild_cpu_group")
     try:
-        from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+        from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_world_group
+        get_world_group.barrier()
         try:
+            logger.info("worker rebuilding dp_cpu_group")
             get_dp_group().reinit_cpu_group()
         except AssertionError:
             pass
         try:
+            logger.info("worker rebuilding pp_cpu_group")
             get_pp_group().reinit_cpu_group()
         except AssertionError:
             pass
