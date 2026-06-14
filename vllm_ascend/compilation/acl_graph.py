@@ -95,9 +95,7 @@ class ACLGraphWrapper:
 
     @classmethod
     def clear_all_graphs(cls) -> None:
-        current_platform._global_graph_pool = torch.npu.graph_pool_handle()
         for instance in list(cls._all_instances):
-            instance.graph_pool = current_platform.get_global_graph_pool()
             instance.clear_graphs()
     
     @classmethod
