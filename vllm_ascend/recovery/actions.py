@@ -245,11 +245,10 @@ def _restart_device(executor: Any, cfg:dict | None) -> bool:
         time.sleep(1)
         waited += 1
     if not executor.exception_occur:
-        logger.error(
+        logger.warning(
             "restart_device timed out after %ds waiting for exception_occur",
             max_wait,
         )
-        return cfg, False
 
     try:
         cfg = cfg or {}
