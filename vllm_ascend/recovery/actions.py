@@ -81,13 +81,14 @@ def _label_dirty_requests(executer: Any, cfg: dict) -> Tuple[dict, bool]:
 def _clean_batch_queue(executer: Any, cfg: dict) -> Tuple[dict, bool]:
     logger.info("[dp_rank=%d] entering clean_batch_queue", executer.dp_rank)
 
+    max_wait = 5
+    waited = 0
     # Wait for exception_occurred to prevent race condition with engine_core main thread.
     # In theory, when all workers encounter errors, engine_core should also fail.
     # However, there may be a brief delay before engine_core detects the failure.
     # To prevent race conditions between batch_queue cleanup and engine_core main thread,
     # we wait up to 5 seconds for engine_core to detect the failure (usually sufficient).
-    max_wait = 5
-    waited = 0
+
     while not executer.exception_occurred and waited <= max_wait:
         time.sleep(1)
         waited += 1
