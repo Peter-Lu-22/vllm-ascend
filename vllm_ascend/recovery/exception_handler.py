@@ -61,7 +61,7 @@ class NetworkExceptionHandler(ExceptionHandler):
                 RecoveryAction(name="clean_batch_queue"),
                 RecoveryAction(name="recompute_dirty_requests"),
             ],
-            timeout_s=60
+            timeout_s=30
         )
 
         # Step 3: Clean worker cache
@@ -71,7 +71,7 @@ class NetworkExceptionHandler(ExceptionHandler):
             actions=[
                 RecoveryAction(name="worker_clean_dirty_requests_cache"),
             ],
-            timeout_s=60
+            timeout_s=30
         )
 
         # Step 4: Re-capture graph
@@ -82,7 +82,7 @@ class NetworkExceptionHandler(ExceptionHandler):
                 RecoveryAction(name="worker_rebuild_cpu_group"),
                 RecoveryAction(name="worker_recapture_graph"),
             ],
-            timeout_s=120
+            timeout_s=180
         )
 
         network_recover_plan = RecoveryPlan(
