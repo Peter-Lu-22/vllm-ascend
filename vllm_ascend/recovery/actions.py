@@ -104,13 +104,34 @@ def _clean_batch_queue(executer: Any, cfg: dict) -> Tuple[dict, bool]:
         logger.info("[dp_rank=%d] batch_queue is None, skip clean", executer.dp_rank)
         return cfg, True
 
+    # Drain batch_queue without calling future.result(), which may block
+    # forever if the worker is already faulted and not enqueueing responses.
+    # Instead, mark futures as failed so any waiter gets notified.
+    from concurrent.futures import InvalidStateError
+    from contextlib import suppress
+
     while executer.batch_queue:
         future, _, _ = executer.batch_queue.pop()
-        try:
-            future.result()
-        except Exception:
-            pass
+        with suppress(InvalidStateError):
+            future.set_exception(
+                RuntimeError("recovery: batch discarded")
+            )
     logger.info("[dp_rank=%d] batch_queue drained", executer.dp_rank)
+
+    # Also drain futures_queue in the model executor to ensure no
+    # FutureWrapper is left waiting for a response that will never arrive.
+    model_executor = getattr(executer, "model_executor", None)
+    futures_queue = getattr(model_executor, "futures_queue", None)
+    if futures_queue is not None:
+        while futures_queue:
+            fw = futures_queue.pop()
+            if hasattr(fw, "set_exception"):
+                with suppress(InvalidStateError):
+                    fw.set_exception(
+                        RuntimeError("recovery: future discarded")
+                    )
+        logger.info("[dp_rank=%d] futures_queue drained", executer.dp_rank)
+
     return cfg, True
 
 def _collect_request_block_ids(scheduler, req_id: str) -> set[int]:
@@ -238,7 +259,7 @@ def _restart_device(executor: Any, cfg:dict | None) -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     # Wait for exception_occur before restarting device
-    max_wait = get_ascend_config().recovery_config.cpu_process_group_timeout
+    max_wait = get_ascend_config().recovery_config.collective_rpc_timeout
     waited = 0
     while not executor.exception_occur and waited <= max_wait:
         logger.warning("restart_device waiting for exception_occur")
@@ -367,3 +388,145 @@ def _recovery_finished(executor: Any, cfg: dict | None) -> bool:
     executor.exception_occur = False
     logger.info("recovery_finished executed successfully")
     return cfg, True
+
+
+@worker_action("drain_rpc_broadcast_mq")
+def _drain_rpc_broadcast_mq(executor: Any, cfg: dict | None) -> bool:
+    """Drain all pending methods from rpc_broadcast_mq without executing them.
+
+    Must be called after recovery_begin (in_recovery=True) so that
+    worker_busy_loop has paused. Drops all in-flight scheduler
+    outputs / rpc calls that were enqueued before the fault.
+    """
+    logger.info("entering drain_rpc_broadcast_mq")
+    try:
+        worker_proc = executor
+
+        # Wait for busy_loop to pause (it checks in_recovery at loop top).
+        if hasattr(worker_proc, "wait_for_busy_loop_pause"):
+            if not worker_proc.wait_for_busy_loop_pause(timeout=10):
+                logger.warning("busy_loop did not pause within 10s")
+        else:
+            # Fallback: small sleep if patch not applied.
+            time.sleep(1)
+
+        rpc_mq = getattr(worker_proc, "rpc_broadcast_mq", None)
+        if rpc_mq is None:
+            logger.info("rpc_broadcast_mq is None, skip drain")
+            return cfg, True
+
+        drained = 0
+        while True:
+            try:
+                rpc_mq.dequeue(timeout=0.1)
+                drained += 1
+            except Exception:
+                break
+
+        logger.info("drain_rpc_broadcast_mq: drained %d messages", drained)
+        return cfg, True
+    except Exception as e:
+        logger.error(f"drain_rpc_broadcast_mq failed with exception: {e}")
+        return cfg, False
+
+
+@worker_action("worker_pause_async_output")
+def _worker_pause_async_output(executor: Any, cfg: dict | None) -> bool:
+    """Wait for the async output thread to finish all pending enqueues.
+
+    Ensures no concurrent enqueue_output is in flight before
+    reset_worker_mqs resets worker_response_mq.
+    """
+    logger.info("entering worker_pause_async_output")
+    try:
+        worker_proc = executor
+
+        if hasattr(worker_proc, "wait_for_async_drain"):
+            drained = worker_proc.wait_for_async_drain(timeout=30)
+            if not drained:
+                logger.warning(
+                    "async output not fully drained after 30s, "
+                    "proceeding with reset anyway"
+                )
+        else:
+            # Fallback: if patch not applied, just sleep briefly.
+            time.sleep(1)
+
+        logger.info("worker_pause_async_output executed successfully")
+        return cfg, True
+    except Exception as e:
+        logger.error(f"worker_pause_async_output failed with exception: {e}")
+        return cfg, False
+
+
+@worker_action("reset_worker_mqs")
+def _reset_worker_mqs(executor: Any, cfg: dict | None) -> bool:
+    """Reset both rpc_broadcast_mq (Reader) and worker_response_mq (Writer)
+    on the worker side.
+
+    Prerequisites:
+    - recovery_begin has set in_recovery=True (busy_loop stopped).
+    - drain_rpc_broadcast_mq has drained pending inputs.
+    - No concurrent enqueue/dequeue is in flight.
+    """
+    logger.info("entering reset_worker_mqs")
+    try:
+        worker_proc = executor
+
+        # rpc_broadcast_mq: Worker is the Reader.
+        rpc_mq = getattr(worker_proc, "rpc_broadcast_mq", None)
+        if rpc_mq is not None:
+            rpc_mq.reset()
+            logger.info("rpc_broadcast_mq reset (Reader side)")
+
+        # worker_response_mq: Worker is the Writer.
+        resp_mq = getattr(worker_proc, "worker_response_mq", None)
+        if resp_mq is not None:
+            resp_mq.reset()
+            logger.info("worker_response_mq reset (Writer side)")
+
+        return cfg, True
+    except Exception as e:
+        logger.error(f"reset_worker_mqs failed with exception: {e}")
+        return cfg, False
+
+
+@engine_core_action("reset_engine_mqs")
+def _reset_engine_mqs(executer: Any, cfg: dict) -> Tuple[dict, bool]:
+    """Reset rpc_broadcast_mq (Writer) and all response_mqs (Reader) on the
+    EngineCore side.
+
+    Prerequisites:
+    - clean_batch_queue has drained batch_queue and futures_queue.
+    - Worker side has already reset (reset_worker_mqs).
+    """
+    logger.info("[dp_rank=%d] entering reset_engine_mqs", executer.dp_rank)
+    try:
+        model_executor = getattr(executer, "model_executor", None)
+
+        # rpc_broadcast_mq: EngineCore is the Writer.
+        rpc_mq = getattr(model_executor, "rpc_broadcast_mq", None)
+        if rpc_mq is not None:
+            rpc_mq.reset()
+            logger.info(
+                "[dp_rank=%d] rpc_broadcast_mq reset (Writer side)",
+                executer.dp_rank,
+            )
+
+        # response_mqs: EngineCore is the Reader (one per worker).
+        response_mqs = getattr(model_executor, "response_mqs", [])
+        for i, mq in enumerate(response_mqs):
+            if mq is not None:
+                mq.reset()
+                logger.info(
+                    "[dp_rank=%d] response_mq[%d] reset (Reader side)",
+                    executer.dp_rank,
+                    i,
+                )
+
+        return cfg, True
+    except Exception as e:
+        logger.error(
+            f"[dp_rank={executer.dp_rank}] reset_engine_mqs failed: {e}"
+        )
+        return cfg, False

@@ -857,6 +857,13 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
                     str(e),
                     exc_info=True
                 )
+                # If not already recovering, dispatch a fire-and-forget
+                # health_check_sync to all workers to surface hidden NPU
+                # runtime faults. Some network failures don't immediately
+                # raise on workers but will be caught by torch.npu.synchronize.
+                # output_rank=-1 means no worker will enqueue a response.
+                if not self._recovery_handler.is_recovering:
+                    self._trigger_health_check_sync()
                 if self._wait_for_recovery_on_exception():
                     continue
                 raise
@@ -1023,6 +1030,36 @@ class DPEngineCoreProcWithRecovery(DPEngineCoreProc):
             logger.error("[dp_rank=%d] Recovery failed, raising exception",
                          self.dp_rank)
             raise RuntimeError("Recovery failed")
+
+    def _trigger_health_check_sync(self) -> None:
+        """Fire-and-forget: dispatch health_check_sync to all workers.
+
+        Uses rpc_broadcast_mq with output_rank=-1 so no worker enqueues a
+        response. If a worker's torch.npu.synchronize raises, the
+        fault_recovery_decorator catches it and reports to WorkerMonitor,
+        which triggers the recovery plan via DPCoordinator.
+        """
+        logger.info(
+            "[dp_rank=%d] Triggering health_check_sync on all workers "
+            "(fire-and-forget, output_rank=-1)",
+            self.dp_rank,
+        )
+        try:
+            executor = self.model_executor
+            rpc_mq = getattr(executor, "rpc_broadcast_mq", None)
+            if rpc_mq is not None:
+                rpc_mq.enqueue(("health_check_sync", (), {}, -1))
+            else:
+                logger.warning(
+                    "[dp_rank=%d] rpc_broadcast_mq not available, "
+                    "skipping health_check_sync",
+                    self.dp_rank,
+                )
+        except Exception:
+            logger.exception(
+                "[dp_rank=%d] Failed to trigger health_check_sync",
+                self.dp_rank,
+            )
 
     def _wait_for_recovery_on_exception(self) -> bool:
         logger.info(

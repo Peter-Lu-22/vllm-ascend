@@ -848,6 +848,19 @@ class NPUWorker(WorkerBase):
         self.profile_memory()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
+    @fault_recovery_decorator()
+    def health_check_sync(self) -> None:
+        """Health check: synchronize NPU to surface hidden runtime faults.
+
+        This is a fire-and-forget action dispatched by EngineCore when it
+        catches an exception but no worker has reported a fault yet.
+        If the underlying NPU runtime has a hidden fault (e.g. broken HCCL
+        link that hasn't surfaced yet), torch.npu.synchronize will raise an
+        exception, which is caught by fault_recovery_decorator and reported
+        to WorkerMonitor, triggering the recovery plan.
+        """
+        torch.npu.synchronize()
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()

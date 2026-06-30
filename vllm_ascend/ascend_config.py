@@ -710,26 +710,26 @@ class RejectionSamplerConfig:
 
 
 class RecoveryConfig:
-    CPU_PROCESS_GROUP_TIMEOUT_MIN = 25
-    CPU_PROCESS_GROUP_TIMEOUT_MAX = 60
-    CPU_PROCESS_GROUP_TIMEOUT_DEFAULT = 30
+    COLLECTIVE_RPC_TIMEOUT_MIN = 25
+    COLLECTIVE_RPC_TIMEOUT_MAX = 60
+    COLLECTIVE_RPC_TIMEOUT_DEFAULT = 30
 
     def __init__(self, user_config: dict | None, env_enable: bool):
         if user_config is None:
             user_config = {}
         self.enable = user_config.get("enable", False) or env_enable
-        self.cpu_process_group_timeout = user_config.get(
-            "cpu_process_group_timeout", self.CPU_PROCESS_GROUP_TIMEOUT_DEFAULT
+        self.collective_rpc_timeout = user_config.get(
+            "collective_rpc_timeout", self.COLLECTIVE_RPC_TIMEOUT_DEFAULT
         )
         if self.enable:
             self._validate()
 
     def _validate(self):
-        if not self.CPU_PROCESS_GROUP_TIMEOUT_MIN <= self.cpu_process_group_timeout <= self.CPU_PROCESS_GROUP_TIMEOUT_MAX:
+        if not self.COLLECTIVE_RPC_TIMEOUT_MIN <= self.collective_rpc_timeout <= self.COLLECTIVE_RPC_TIMEOUT_MAX:
             raise ValueError(
-                f"recovery_config.cpu_process_group_timeout must be between "
-                f"{self.CPU_PROCESS_GROUP_TIMEOUT_MIN}s and {self.CPU_PROCESS_GROUP_TIMEOUT_MAX}s, "
-                f"got {self.cpu_process_group_timeout}s"
+                f"recovery_config.collective_rpc_timeout must be between "
+                f"{self.COLLECTIVE_RPC_TIMEOUT_MIN}s and {self.COLLECTIVE_RPC_TIMEOUT_MAX}s, "
+                f"got {self.collective_rpc_timeout}s"
             )
 
 

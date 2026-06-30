@@ -115,7 +115,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # device and reprocessing dirty requests. Default is 0 (disabled).
     # Set to 1 to enable. Detailed configuration is available via
     # --additional-config with key "recovery_config", e.g.
-    # {"recovery_config": {"enable": true, "cpu_process_group_timeout": 30}}
+    # {"recovery_config": {"enable": true, "collective_rpc_timeout": 30}}
     "VLLM_ASCEND_ENABLE_RECOVERY": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_RECOVERY", "0"))),
 }
 

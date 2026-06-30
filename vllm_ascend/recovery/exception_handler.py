@@ -29,9 +29,11 @@ class NetworkExceptionHandler(ExceptionHandler):
         """
         Network link failure recovery plan:
         1. device_recovery_step: recovery_begin -> stop_device -> restart_device -> reinit_process_group
-        2. clean_engine_cache_step: label_dirty_requests -> clean_batch_queue -> recompute_dirty_requests
-        3. clean_worker_cache_step: worker_clean_dirty_requests_cache
-        4. re_capture_graph: worker_rebuild_cpu_group -> worker_recapture_graph
+        2. worker_drain_step: drain_rpc_broadcast_mq -> worker_pause_async_output
+        3. clean_engine_cache_step: label_dirty_requests -> clean_batch_queue -> recompute_dirty_requests
+        4. reset_mq_step: reset_worker_mqs -> reset_engine_mqs (clear ShmRingBuffer + ZMQ)
+        5. clean_worker_cache_step: worker_clean_dirty_requests_cache
+        6. re_capture_graph: worker_rebuild_cpu_group -> worker_recapture_graph
         """
         config = dict[str, Any]()
 
@@ -52,7 +54,18 @@ class NetworkExceptionHandler(ExceptionHandler):
             timeout_s=60
         )
 
-        # Step 2: Clean engine cache
+        # Step 2: Worker drain in-flight inputs + pause async output
+        worker_drain_step = RecoveryStep(
+            name="worker_drain",
+            target="worker",
+            actions=[
+                RecoveryAction(name="drain_rpc_broadcast_mq"),
+                RecoveryAction(name="worker_pause_async_output"),
+            ],
+            timeout_s=30
+        )
+
+        # Step 3: Clean engine cache (batch_queue + futures_queue)
         clean_engine_cache_step = RecoveryStep(
             name="clean_engine_cache",
             target="engine_core",
@@ -64,7 +77,25 @@ class NetworkExceptionHandler(ExceptionHandler):
             timeout_s=30
         )
 
-        # Step 3: Clean worker cache
+        # Step 4: Reset message queues (both sides)
+        reset_worker_mq_step = RecoveryStep(
+            name="reset_worker_mq",
+            target="worker",
+            actions=[
+                RecoveryAction(name="reset_worker_mqs"),
+            ],
+            timeout_s=10
+        )
+        reset_engine_mq_step = RecoveryStep(
+            name="reset_engine_mq",
+            target="engine_core",
+            actions=[
+                RecoveryAction(name="reset_engine_mqs"),
+            ],
+            timeout_s=10
+        )
+
+        # Step 5: Clean worker cache
         clean_worker_cache_step = RecoveryStep(
             name="clean_worker_cache",
             target="worker",
@@ -74,7 +105,7 @@ class NetworkExceptionHandler(ExceptionHandler):
             timeout_s=30
         )
 
-        # Step 4: Re-capture graph
+        # Step 6: Re-capture graph
         re_capture_graph_step = RecoveryStep(
             name="re_capture_graph",
             target="worker",
@@ -89,7 +120,10 @@ class NetworkExceptionHandler(ExceptionHandler):
             name="network_recover_plan",
             steps=[
                 device_recovery_step,
+                worker_drain_step,
                 clean_engine_cache_step,
+                reset_worker_mq_step,
+                reset_engine_mq_step,
                 clean_worker_cache_step,
                 re_capture_graph_step,
             ],

@@ -128,10 +128,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
 
-        # Get CPU group timeout from RecoveryConfig only for DP and PP groups
+        # Get CPU group timeout from RecoveryConfig only for DP and PP groups.
+        # cpu_group timeout equals collective_rpc_timeout.
         ascend_config = get_ascend_config()
         if group_name in ("dp", "pp") and ascend_config.recovery_config.enable:
-            self._cpu_group_timeout = ascend_config.recovery_config.cpu_process_group_timeout
+            self._cpu_group_timeout = ascend_config.recovery_config.collective_rpc_timeout
 
         reuse_domain = _resolve_reuse_domain(group_name)
 
