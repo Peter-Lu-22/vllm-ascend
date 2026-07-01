@@ -183,10 +183,18 @@ def wait_for_busy_loop_pause(self, timeout: float = 10.0) -> bool:
 # ---------------------------------------------------------------------------
 # Apply patches
 # ---------------------------------------------------------------------------
+# NOTE: Ascend forces spawn mode for multiprocessing (torch.cuda.is_initialized()
+# returns True after NPU init, triggering _maybe_force_spawn()). In spawn mode,
+# the child process starts a fresh Python interpreter and does NOT inherit
+# monkey-patches applied in the parent. We solve this by wrapping
+# WorkerProc.worker_main (the subprocess entry point): when the child unpickles
+# the wrapper it imports this module, which re-applies all patches before the
+# original worker_main runs. This is the same pattern used by
+# patch_profiling_chunk.py for EngineCoreProc.run_engine_core.
 
-# Inject in-flight tracking attributes into __init__.
-# We wrap the original __init__ to add our attributes after it runs.
+# Capture originals before patching.
 _orig_init = WorkerProc.__init__
+_original_worker_main = WorkerProc.worker_main
 
 
 def _patched_init(self, *args, **kwargs):
@@ -198,10 +206,32 @@ def _patched_init(self, *args, **kwargs):
     self._busy_loop_paused = False
 
 
-WorkerProc.__init__ = _patched_init
-WorkerProc.enqueue_output = enqueue_output
-WorkerProc.handle_output = handle_output
-WorkerProc.async_output_busy_loop = async_output_busy_loop
-WorkerProc.worker_busy_loop = worker_busy_loop
-WorkerProc.wait_for_async_drain = wait_for_async_drain
-WorkerProc.wait_for_busy_loop_pause = wait_for_busy_loop_pause
+def _apply_recovery_patches():
+    """Apply all WorkerProc patches. Idempotent — safe to call multiple times."""
+    WorkerProc.__init__ = _patched_init
+    WorkerProc.enqueue_output = enqueue_output
+    WorkerProc.handle_output = handle_output
+    WorkerProc.async_output_busy_loop = async_output_busy_loop
+    WorkerProc.worker_busy_loop = worker_busy_loop
+    WorkerProc.wait_for_async_drain = wait_for_async_drain
+    WorkerProc.wait_for_busy_loop_pause = wait_for_busy_loop_pause
+
+
+def _patched_worker_main(*args, **kwargs):
+    """Wrapper around WorkerProc.worker_main that re-applies patches in the
+    child process when using spawn mode.
+
+    When the child process unpickles this wrapper (the target of
+    multiprocessing.Process), it imports this module, which runs
+    _apply_recovery_patches() at module level. This call is a safety net
+    to ensure patches are active before the original worker_main runs.
+    """
+    _apply_recovery_patches()
+    return _original_worker_main(*args, **kwargs)
+
+
+# Apply patches in the parent process (for fork mode and in-process usage).
+_apply_recovery_patches()
+
+# Wrap worker_main so that spawned children re-apply patches.
+WorkerProc.worker_main = _patched_worker_main
