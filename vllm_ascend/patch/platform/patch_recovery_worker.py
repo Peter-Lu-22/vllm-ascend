@@ -205,6 +205,20 @@ def _patched_init(self, *args, **kwargs):
     self._async_drained_event.set()  # initially drained (nothing in flight)
     self._busy_loop_paused = False
 
+    # Inject MQ references and helper methods into the inner NPUWorker so
+    # that WorkerMonitor's recovery actions (which receive NPUWorker as
+    # `executor`) can access rpc_broadcast_mq, worker_response_mq,
+    # wait_for_busy_loop_pause and wait_for_async_drain that live on
+    # WorkerProc. The attribute path self.worker.worker follows
+    # WorkerProc -> WorkerWrapperBase -> NPUWorker (same path used in
+    # enqueue_output above to set exception_occur).
+    inner_worker = getattr(getattr(self, "worker", None), "worker", None)
+    if inner_worker is not None:
+        inner_worker.rpc_broadcast_mq = self.rpc_broadcast_mq
+        inner_worker.worker_response_mq = self.worker_response_mq
+        inner_worker.wait_for_busy_loop_pause = self.wait_for_busy_loop_pause
+        inner_worker.wait_for_async_drain = self.wait_for_async_drain
+
 
 def _apply_recovery_patches():
     """Apply all WorkerProc patches. Idempotent — safe to call multiple times."""

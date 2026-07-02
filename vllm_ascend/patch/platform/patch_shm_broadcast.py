@@ -11,12 +11,34 @@
 
 import time
 
+import torch
 import zmq
 from vllm.distributed.device_communicators.shm_broadcast import (
     MessageQueue,
+    ShmRingBuffer,
     SpinCondition,
 )
 from vllm.logger import logger
+
+
+def _shm_ring_buffer_reset(self):
+    """Reset ShmRingBuffer for fault recovery.
+
+    Clears all metadata flags to 0, restoring every chunk to the
+    "not written yet, can write" state (case 1 in the state machine),
+    so that the writer can reuse the buffer from the beginning.
+
+    This mirrors the metadata initialization in ShmRingBuffer.__init__.
+    It must be called when no concurrent enqueue/dequeue is in flight
+    (guaranteed by the recovery pause protocol).
+    """
+    assert self.shared_memory.buf is not None, "Buffer has been closed"
+    with self.shared_memory.buf[self.metadata_offset:] as metadata_buffer:
+        torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
+    logger.debug(
+        "ShmRingBuffer: reset %d chunks (metadata cleared)",
+        self.max_chunks,
+    )
 
 
 def _spin_condition_reset(self):
@@ -127,5 +149,6 @@ def _message_queue_reset(self):
 
 
 # Apply patches.
+ShmRingBuffer.reset = _shm_ring_buffer_reset
 SpinCondition.reset = _spin_condition_reset
 MessageQueue.reset = _message_queue_reset
